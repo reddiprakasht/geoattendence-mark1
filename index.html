@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Geofence Attendance Tracker</title>
+    <style>
+        :root { --primary: #4f46e5; --bg: #f8fafc; --text: #1e293b; }
+        body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .card { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); width: 100%; max-width: 450px; }
+        h2 { margin-top: 0; color: var(--primary); text-align: center; }
+        input, button { width: 100%; padding: 12px; margin: 8px 0 16px 0; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; font-size: 1rem; }
+        button { background: var(--primary); color: white; border: none; cursor: pointer; font-weight: bold; }
+        button:hover { opacity: 0.9; }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th, td { padding: 10px; border-bottom: 1px solid #e2e8f0; text-align: left; font-size: 0.9rem; }
+        .status-present { color: #16a34a; font-weight: bold; }
+        .status-absent { color: #dc2626; font-weight: bold; }
+        .hidden { display: none; }
+        .back-btn { background: #64748b; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="card" id="app">
+    <!-- LOGIN VIEW -->
+    <div id="login-view">
+        <h2>Attendance Login</h2>
+        <label>Select Role:</label>
+        <select id="login-role">
+            <option value="worker">Worker</option>
+            <option value="admin">Admin</option>
+        </select>
+        <label>Worker/Admin Name:</label>
+        <input type="text" id="login-name" placeholder="Enter your name">
+        <button onclick="handleLogin()">Login</button>
+    </div>
+
+    <!-- WORKER DASHBOARD -->
+    <div id="worker-view" class="hidden">
+        <h2>Worker Dashboard</h2>
+        <p>Welcome, <span id="worker-display-name"></span>!</p>
+        <p style="font-size: 0.9rem; color: #64748b;">Click below to verify your location and mark your presence within the office boundary.</p>
+        <button onclick="markPresent()">Mark Present</button>
+        <p id="worker-msg" style="text-align: center; font-weight: bold;"></p>
+        <button class="back-btn" onclick="logout()">Logout</button>
+    </div>
+
+    <!-- ADMIN DASHBOARD -->
+    <div id="admin-view" class="hidden">
+        <h2>Admin Dashboard</h2>
+        <p>Set Geofence Boundary (Fixed Once):</p>
+        <label>Latitude:</label>
+        <input type="text" id="admin-lat" placeholder="e.g. 17.3850">
+        <label>Longitude:</label>
+        <input type="text" id="admin-lng" placeholder="e.g. 78.4867">
+        <label>Radius (in meters):</label>
+        <input type="text" id="admin-radius" value="100">
+        <button onclick="saveGeofence()">Save Boundary</button>
+        
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid #e2e8f0;">
+        
+        <h3>Workers Status</h3>
+        <button onclick="loadAdminDashboard()" style="background: #0ea5e9; margin-bottom: 10px;">Refresh List</button>
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody id="worker-status-table">
+                <!-- Dynamically loaded -->
+            </tbody>
+        </table>
+        <button class="back-btn" onclick="logout()">Logout</button>
+    </div>
+</div>
+
+<script>
+    // Initialize LocalStorage defaults if empty
+    if (!localStorage.getItem('geofence')) {
+        localStorage.setItem('geofence', JSON.stringify({ lat: 0, lng: 0, radius: 100 }));
+    }
+    if (!localStorage.getItem('workers')) {
+        localStorage.setItem('workers', JSON.stringify({}));
+    }
+
+    function handleLogin() {
+        const role = document.getElementById('login-role').value;
+        const name = document.getElementById('login-name').value.trim();
+        if (!name) { alert('Please enter your name'); return; }
+
+        localStorage.setItem('currentUser', JSON.stringify({ name, role }));
+        
+        if (role === 'admin') {
+            showAdmin();
+        } else {
+            showWorker();
+        }
+    }
+
+    function showWorker() {
+        document.getElementById('login-view').classList.add('hidden');
+        document.getElementById('admin-view').classList.add('hidden');
+        document.getElementById('worker-view').classList.remove('hidden');
+        const user = JSON.parse(localStorage.getItem('currentUser'));
+        document.getElementById('worker-display-name').innerText = user.name;
+    }
+
+    function showAdmin() {
+        document.getElementById('login-view').classList.add('hidden');
+        document.getElementById('worker-view').classList.add('hidden');
+        document.getElementById('admin-view').classList.remove('hidden');
+        
+        const geo = JSON.parse(localStorage.getItem('geofence'));
+        document.getElementById('admin-lat').value = geo.lat;
+        document.getElementById('admin-lng').value = geo.lng;
+        document.getElementById('admin-radius').value = geo.radius;
+        loadAdminDashboard();
+    }
+
+    function saveGeofence() {
+        const lat = parseFloat(document.getElementById('admin-lat').value);
+        const lng = parseFloat(document.getElementById('admin-lng').value);
+        const radius = parseFloat(document.getElementById('admin-radius').value);
+        
+        if(isNaN(lat) || isNaN(lng)) { alert('Enter valid coordinates'); return; }
+        
+        localStorage.setItem('geofence', JSON.stringify({ lat, lng, radius }));
+        alert('Geofence boundary saved successfully!');
+    }
+
+    function loadAdminDashboard() {
+        const workers = JSON.parse(localStorage.getItem('workers')) || {};
+        const tbody = document.getElementById('worker-status-table');
+        tbody.innerHTML = '';
+
+        // Preset example workers + any logged in workers
+        const defaultWorkers = ['John Doe', 'Alice Smith', 'Bob Builder'];
+        defaultWorkers.forEach(w => {
+            if (!workers[w]) workers[w] = 'Absent';
+        });
+
+        for (let [name, status] of Object.entries(workers)) {
+            const row = document.createElement('tr');
+            row.innerHTML = `<td>${name}</td><td class="${status === 'Present' ? 'status-present' : 'status-absent'}">${status}</td>`;
+            tbody.appendChild(row);
+        }
+    }
+
+    function markPresent() {
+        const msg = document.getElementById('worker-msg');
+        const geo = JSON.parse(localStorage.getItem('geofence'));
+        
+        if (geo.lat === 0 && geo.lng === 0) {
+            msg.style.color = '#dc2626';
+            msg.innerText = 'Error: Admin has not set the geofence boundary yet.';
+            return;
+        }
+
+        if (!navigator.geolocation) {
+            msg.style.color = '#dc2626';
+            msg.innerText = 'Geolocation is not supported by your browser';
+            return;
+        }
+
+        msg.style.color = '#4f46e5';
+        msg.innerText = 'Checking your GPS location...';
+
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const userLat = position.coords.latitude;
+                const userLng = position.coords.longitude;
+                
+                const distance = getDistanceFromLatLonInMeters(userLat, userLng, geo.lat, geo.lng);
+                
+                if (distance <= geo.radius) {
+                    const user = JSON.parse(localStorage.getItem('currentUser'));
+                    const workers = JSON.parse(localStorage.getItem('workers')) || {};
+                    workers[user.name] = 'Present';
+                    localStorage.setItem('workers', JSON.stringify(workers));
+                    
+                    msg.style.color = '#16a34a';
+                    msg.innerText = `Success! Marked Present (Within ${Math.round(distance)}m of boundary).`;
+                } else {
+                    msg.style.color = '#dc2626';
+                    msg.innerText = `Failed: You are outside the boundary (${Math.round(distance)}m away).`;
+                }
+            },
+            (error) => {
+                msg.style.color = '#dc2626';
+                msg.innerText = 'Location access denied or unavailable.';
+            }
+        );
+    }
+
+    function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
+        const R = 6371000; // Radius of the earth in meters
+        const dLat = deg2rad(lat2 - lat1);
+        const dLon = deg2rad(lon2 - lon1);
+        const a = 
+            Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) * 
+            Math.sin(dLon/2) * Math.sin(dLon/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return R * c; 
+    }
+
+    function deg2rad(deg) {
+        return deg * (Math.PI/180);
+    }
+
+    function logout() {
+        localStorage.removeItem('currentUser');
+        document.getElementById('worker-view').classList.add('hidden');
+        document.getElementById('admin-view').classList.add('hidden');
+        document.getElementById('login-view').classList.remove('hidden');
+    }
+</script>
+
+</body>
+</html>
