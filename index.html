@@ -9,15 +9,20 @@
         body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
         .card { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); width: 100%; max-width: 450px; }
         h2 { margin-top: 0; color: var(--primary); text-align: center; }
-        input, button { width: 100%; padding: 12px; margin: 8px 0 16px 0; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; font-size: 1rem; }
+        input, select, button { width: 100%; padding: 12px; margin: 8px 0 16px 0; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; font-size: 1rem; }
         button { background: var(--primary); color: white; border: none; cursor: pointer; font-weight: bold; }
         button:hover { opacity: 0.9; }
+        label { display: block; }
         table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
         th, td { padding: 10px; border-bottom: 1px solid #e2e8f0; text-align: left; font-size: 0.9rem; }
         .status-present { color: #16a34a; font-weight: bold; }
         .status-absent { color: #dc2626; font-weight: bold; }
         .hidden { display: none; }
         .back-btn { background: #64748b; margin-top: 10px; }
+        .secondary-btn { background: #0ea5e9; }
+        .admin-msg { min-height: 1.25rem; font-size: 0.9rem; }
+        .notice { color: #64748b; font-size: 0.85rem; }
+        .section-title { margin-bottom: 0.25rem; }
     </style>
 </head>
 <body>
@@ -27,72 +32,185 @@
     <div id="login-view">
         <h2>Attendance Login</h2>
         <label>Select Role:</label>
-        <select id="login-role">
+        <select id="login-role" onchange="updateLoginFields()">
             <option value="worker">Worker</option>
             <option value="admin">Admin</option>
         </select>
-        <label>Worker/Admin Name:</label>
-        <input type="text" id="login-name" placeholder="Enter your name">
+        <label id="login-name-label" for="login-name">Worker Name:</label>
+        <input type="text" id="login-name" placeholder="Enter your name" autocomplete="username">
+        <div id="login-password-wrap" class="hidden">
+            <label for="login-password">Admin Password:</label>
+            <input type="password" id="login-password" placeholder="Enter your admin password" autocomplete="current-password">
+        </div>
+        <p id="login-help" class="notice">Choose Worker to mark attendance.</p>
+        <p id="login-msg" class="admin-msg" role="status" aria-live="polite"></p>
         <button onclick="handleLogin()">Login</button>
+        <p class="notice">This basic version saves data in this browser only. Admin login is not server-secured.</p>
     </div>
 
     <!-- WORKER DASHBOARD -->
     <div id="worker-view" class="hidden">
+        <button class="back-btn" onclick="logout()">Back to Login / Logout</button>
         <h2>Worker Dashboard</h2>
         <p>Welcome, <span id="worker-display-name"></span>!</p>
         <p style="font-size: 0.9rem; color: #64748b;">Click below to verify your location and mark your presence within the office boundary.</p>
         <button onclick="markPresent()">Mark Present</button>
         <p id="worker-msg" style="text-align: center; font-weight: bold;"></p>
-        <button class="back-btn" onclick="logout()">Logout</button>
+        <button class="back-btn" onclick="logout()">Back to Login / Logout</button>
     </div>
 
     <!-- ADMIN DASHBOARD -->
     <div id="admin-view" class="hidden">
+        <button class="back-btn" onclick="logout()">Back to Login / Logout</button>
         <h2>Admin Dashboard</h2>
-        <p>Set Geofence Boundary (Fixed Once):</p>
+        <p>Set or change the office geofence boundary:</p>
         <label>Latitude:</label>
-        <input type="text" id="admin-lat" placeholder="e.g. 17.3850">
+        <input type="number" id="admin-lat" min="-90" max="90" step="any" placeholder="e.g. 17.3850">
         <label>Longitude:</label>
-        <input type="text" id="admin-lng" placeholder="e.g. 78.4867">
+        <input type="number" id="admin-lng" min="-180" max="180" step="any" placeholder="e.g. 78.4867">
         <label>Radius (in meters):</label>
-        <input type="text" id="admin-radius" value="100">
+        <input type="number" id="admin-radius" min="1" step="any" value="100">
         <button onclick="saveGeofence()">Save Boundary</button>
+        <button class="secondary-btn" onclick="useCurrentLocationForBoundary()">Use my current location</button>
+        <p id="admin-msg" class="admin-msg" role="status" aria-live="polite"></p>
         
         <hr style="margin: 20px 0; border: 0; border-top: 1px solid #e2e8f0;">
         
-        <h3>Workers Status</h3>
+        <h3 class="section-title">Today's Attendance</h3>
+        <p id="attendance-date" class="notice"></p>
         <button onclick="loadAdminDashboard()" style="background: #0ea5e9; margin-bottom: 10px;">Refresh List</button>
         <table>
             <thead>
                 <tr>
                     <th>Name</th>
                     <th>Status</th>
+                    <th>Time</th>
                 </tr>
             </thead>
             <tbody id="worker-status-table">
                 <!-- Dynamically loaded -->
             </tbody>
         </table>
-        <button class="back-btn" onclick="logout()">Logout</button>
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid #e2e8f0;">
+
+        <h3>Change Admin Login</h3>
+        <label for="admin-current-password">Current password:</label>
+        <input type="password" id="admin-current-password" autocomplete="current-password">
+        <label for="admin-new-name">New admin username:</label>
+        <input type="text" id="admin-new-name" autocomplete="username">
+        <label for="admin-new-password">New password (at least 8 characters):</label>
+        <input type="password" id="admin-new-password" autocomplete="new-password">
+        <label for="admin-confirm-password">Confirm new password:</label>
+        <input type="password" id="admin-confirm-password" autocomplete="new-password">
+        <button onclick="changeAdminCredentials()">Update Admin Login</button>
+        <p id="credentials-msg" class="admin-msg" role="status" aria-live="polite"></p>
+        <button class="back-btn" onclick="logout()">Back to Login / Logout</button>
     </div>
 </div>
 
 <script>
     // Initialize LocalStorage defaults if empty
     if (!localStorage.getItem('geofence')) {
-        localStorage.setItem('geofence', JSON.stringify({ lat: 0, lng: 0, radius: 100 }));
+        localStorage.setItem('geofence', JSON.stringify({ lat: null, lng: null, radius: 100, configured: false }));
     }
-    if (!localStorage.getItem('workers')) {
-        localStorage.setItem('workers', JSON.stringify({}));
+    if (!localStorage.getItem('attendance')) {
+        const attendance = {};
+        const legacyWorkers = JSON.parse(localStorage.getItem('workers') || '{}');
+        if (Object.keys(legacyWorkers).length) {
+            attendance[getLocalDateKey()] = legacyWorkers;
+        }
+        localStorage.setItem('attendance', JSON.stringify(attendance));
+    }
+    localStorage.removeItem('currentUser');
+    updateLoginFields();
+
+    function updateLoginFields() {
+        const isAdmin = document.getElementById('login-role').value === 'admin';
+        document.getElementById('login-name-label').innerText = isAdmin ? 'Admin Username:' : 'Worker Name:';
+        document.getElementById('login-name').placeholder = isAdmin ? 'Create or enter admin username' : 'Enter your name';
+        document.getElementById('login-password-wrap').classList.toggle('hidden', !isAdmin);
+        document.getElementById('login-help').innerText = isAdmin
+            ? (localStorage.getItem('adminCredentials')
+                ? 'Enter your admin username and password.'
+                : 'First admin login: create your admin username and password.')
+            : 'Choose Worker to mark attendance.';
+        document.getElementById('login-msg').innerText = '';
     }
 
-    function handleLogin() {
+    async function hashPassword(password, salt) {
+        if (!window.crypto || !window.crypto.subtle) {
+            throw new Error('Secure password hashing is unavailable. Open this page in a modern browser over HTTPS or localhost.');
+        }
+        const saltBytes = Uint8Array.from(salt.match(/.{2}/g), value => parseInt(value, 16));
+        const key = await window.crypto.subtle.importKey(
+            'raw',
+            new TextEncoder().encode(password),
+            'PBKDF2',
+            false,
+            ['deriveBits']
+        );
+        const digest = await window.crypto.subtle.deriveBits(
+            { name: 'PBKDF2', salt: saltBytes, iterations: 120000, hash: 'SHA-256' },
+            key,
+            256
+        );
+        return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    }
+
+    function createSalt() {
+        if (!window.crypto || !window.crypto.getRandomValues) {
+            throw new Error('Secure password setup is unavailable in this browser.');
+        }
+        const values = new Uint8Array(16);
+        window.crypto.getRandomValues(values);
+        return Array.from(values, value => value.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function handleLogin() {
         const role = document.getElementById('login-role').value;
         const name = document.getElementById('login-name').value.trim();
-        if (!name) { alert('Please enter your name'); return; }
+        const msg = document.getElementById('login-msg');
+        msg.style.color = '#dc2626';
+        if (!name) {
+            msg.innerText = role === 'admin' ? 'Enter an admin username.' : 'Enter your name.';
+            return;
+        }
 
-        localStorage.setItem('currentUser', JSON.stringify({ name, role }));
-        
+        if (role === 'admin') {
+            const password = document.getElementById('login-password').value;
+            if (!password) {
+                msg.innerText = 'Enter an admin password.';
+                return;
+            }
+
+            try {
+                let credentials = JSON.parse(localStorage.getItem('adminCredentials'));
+                if (!credentials) {
+                    if (password.length < 8) {
+                        msg.innerText = 'Create a password with at least 8 characters.';
+                        return;
+                    }
+                    const salt = createSalt();
+                    credentials = { name, salt, passwordHash: await hashPassword(password, salt) };
+                    localStorage.setItem('adminCredentials', JSON.stringify(credentials));
+                    msg.style.color = '#16a34a';
+                    msg.innerText = 'Admin account created.';
+                } else {
+                    const passwordHash = await hashPassword(password, credentials.salt);
+                    if (name !== credentials.name || passwordHash !== credentials.passwordHash) {
+                        msg.innerText = 'Incorrect admin username or password.';
+                        return;
+                    }
+                }
+            } catch (error) {
+                msg.innerText = error.message || 'Could not verify admin credentials.';
+                return;
+            }
+        }
+
+        sessionStorage.setItem('currentUser', JSON.stringify({ name, role }));
+        document.getElementById('login-password').value = '';
+
         if (role === 'admin') {
             showAdmin();
         } else {
@@ -104,47 +222,126 @@
         document.getElementById('login-view').classList.add('hidden');
         document.getElementById('admin-view').classList.add('hidden');
         document.getElementById('worker-view').classList.remove('hidden');
-        const user = JSON.parse(localStorage.getItem('currentUser'));
+        const user = getCurrentUser();
+        if (!user || user.role !== 'worker') {
+            logout();
+            return;
+        }
         document.getElementById('worker-display-name').innerText = user.name;
     }
 
     function showAdmin() {
+        if (!isAdmin()) {
+            logout();
+            return;
+        }
         document.getElementById('login-view').classList.add('hidden');
         document.getElementById('worker-view').classList.add('hidden');
         document.getElementById('admin-view').classList.remove('hidden');
         
         const geo = JSON.parse(localStorage.getItem('geofence'));
-        document.getElementById('admin-lat').value = geo.lat;
-        document.getElementById('admin-lng').value = geo.lng;
-        document.getElementById('admin-radius').value = geo.radius;
+        document.getElementById('admin-lat').value = geo.lat ?? '';
+        document.getElementById('admin-lng').value = geo.lng ?? '';
+        document.getElementById('admin-radius').value = geo.radius || 100;
+        document.getElementById('admin-msg').innerText = hasConfiguredGeofence(geo)
+            ? 'A geofence boundary is configured.'
+            : 'Set and save the office boundary before workers can mark attendance.';
         loadAdminDashboard();
     }
 
     function saveGeofence() {
-        const lat = parseFloat(document.getElementById('admin-lat').value);
-        const lng = parseFloat(document.getElementById('admin-lng').value);
-        const radius = parseFloat(document.getElementById('admin-radius').value);
+        if (!isAdmin()) {
+            alert('Only an authenticated admin can change the geofence.');
+            logout();
+            return;
+        }
+        const latInput = document.getElementById('admin-lat').value.trim();
+        const lngInput = document.getElementById('admin-lng').value.trim();
+        const radiusInput = document.getElementById('admin-radius').value.trim();
+        const lat = Number(latInput);
+        const lng = Number(lngInput);
+        const radius = Number(radiusInput);
         
-        if(isNaN(lat) || isNaN(lng)) { alert('Enter valid coordinates'); return; }
+        if (!latInput || !lngInput || !Number.isFinite(lat) || lat < -90 || lat > 90 ||
+            !Number.isFinite(lng) || lng < -180 || lng > 180) {
+            alert('Enter valid latitude (-90 to 90) and longitude (-180 to 180).');
+            return;
+        }
+        if (!radiusInput || !Number.isFinite(radius) || radius <= 0) {
+            alert('Enter a radius greater than 0 meters.');
+            return;
+        }
         
-        localStorage.setItem('geofence', JSON.stringify({ lat, lng, radius }));
+        localStorage.setItem('geofence', JSON.stringify({ lat, lng, radius, configured: true }));
+        document.getElementById('admin-msg').innerText = 'Geofence boundary saved successfully.';
         alert('Geofence boundary saved successfully!');
     }
 
+    function useCurrentLocationForBoundary() {
+        if (!isAdmin()) {
+            alert('Only an authenticated admin can set the geofence.');
+            logout();
+            return;
+        }
+        const msg = document.getElementById('admin-msg');
+        if (!navigator.geolocation) {
+            msg.style.color = '#dc2626';
+            msg.innerText = 'Geolocation is not supported by your browser.';
+            return;
+        }
+
+        msg.style.color = '#4f46e5';
+        msg.innerText = 'Getting your location... Allow location access when prompted.';
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                document.getElementById('admin-lat').value = position.coords.latitude;
+                document.getElementById('admin-lng').value = position.coords.longitude;
+                msg.style.color = '#16a34a';
+                msg.innerText = 'Location added. Confirm the radius, then save the boundary.';
+            },
+            () => {
+                msg.style.color = '#dc2626';
+                msg.innerText = 'Could not get your location. Allow location access or enter coordinates manually.';
+            }
+        );
+    }
+
+    function hasConfiguredGeofence(geo) {
+        return geo &&
+            Number.isFinite(geo.lat) && geo.lat >= -90 && geo.lat <= 90 &&
+            Number.isFinite(geo.lng) && geo.lng >= -180 && geo.lng <= 180 &&
+            Number.isFinite(geo.radius) && geo.radius > 0 &&
+            (geo.configured === true || geo.lat !== 0 || geo.lng !== 0);
+    }
+
     function loadAdminDashboard() {
-        const workers = JSON.parse(localStorage.getItem('workers')) || {};
+        if (!isAdmin()) {
+            logout();
+            return;
+        }
+        const attendance = JSON.parse(localStorage.getItem('attendance')) || {};
+        const records = attendance[getLocalDateKey()] || {};
         const tbody = document.getElementById('worker-status-table');
         tbody.innerHTML = '';
+        document.getElementById('attendance-date').innerText = new Date().toLocaleDateString();
 
-        // Preset example workers + any logged in workers
-        const defaultWorkers = ['John Doe', 'Alice Smith', 'Bob Builder'];
-        defaultWorkers.forEach(w => {
-            if (!workers[w]) workers[w] = 'Absent';
-        });
-
-        for (let [name, status] of Object.entries(workers)) {
+        const workers = new Set(['John Doe', 'Alice Smith', 'Bob Builder', ...Object.keys(records)]);
+        for (const name of workers) {
+            const record = records[name];
+            const status = typeof record === 'string' ? record : record?.status || 'Absent';
+            const timestamp = record && typeof record === 'object' ? record.time : null;
+            const time = timestamp && Number.isFinite(Date.parse(timestamp))
+                ? new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                : '—';
             const row = document.createElement('tr');
-            row.innerHTML = `<td>${name}</td><td class="${status === 'Present' ? 'status-present' : 'status-absent'}">${status}</td>`;
+            const nameCell = document.createElement('td');
+            nameCell.textContent = name;
+            const statusCell = document.createElement('td');
+            statusCell.textContent = status;
+            statusCell.className = status === 'Present' ? 'status-present' : 'status-absent';
+            const timeCell = document.createElement('td');
+            timeCell.textContent = time;
+            row.append(nameCell, statusCell, timeCell);
             tbody.appendChild(row);
         }
     }
@@ -153,7 +350,7 @@
         const msg = document.getElementById('worker-msg');
         const geo = JSON.parse(localStorage.getItem('geofence'));
         
-        if (geo.lat === 0 && geo.lng === 0) {
+        if (!hasConfiguredGeofence(geo)) {
             msg.style.color = '#dc2626';
             msg.innerText = 'Error: Admin has not set the geofence boundary yet.';
             return;
@@ -176,10 +373,21 @@
                 const distance = getDistanceFromLatLonInMeters(userLat, userLng, geo.lat, geo.lng);
                 
                 if (distance <= geo.radius) {
-                    const user = JSON.parse(localStorage.getItem('currentUser'));
-                    const workers = JSON.parse(localStorage.getItem('workers')) || {};
-                    workers[user.name] = 'Present';
-                    localStorage.setItem('workers', JSON.stringify(workers));
+                    const user = getCurrentUser();
+                    if (!user || user.role !== 'worker') {
+                        msg.style.color = '#dc2626';
+                        msg.innerText = 'Please log in again to mark attendance.';
+                        logout();
+                        return;
+                    }
+                    const attendance = JSON.parse(localStorage.getItem('attendance')) || {};
+                    const dateKey = getLocalDateKey();
+                    if (!attendance[dateKey]) attendance[dateKey] = {};
+                    attendance[dateKey][user.name] = {
+                        status: 'Present',
+                        time: new Date().toISOString()
+                    };
+                    localStorage.setItem('attendance', JSON.stringify(attendance));
                     
                     msg.style.color = '#16a34a';
                     msg.innerText = `Success! Marked Present (Within ${Math.round(distance)}m of boundary).`;
@@ -212,10 +420,92 @@
     }
 
     function logout() {
-        localStorage.removeItem('currentUser');
+        sessionStorage.removeItem('currentUser');
+        document.getElementById('login-name').value = '';
+        document.getElementById('login-password').value = '';
+        document.getElementById('admin-current-password').value = '';
+        document.getElementById('admin-new-name').value = '';
+        document.getElementById('admin-new-password').value = '';
+        document.getElementById('admin-confirm-password').value = '';
         document.getElementById('worker-view').classList.add('hidden');
         document.getElementById('admin-view').classList.add('hidden');
         document.getElementById('login-view').classList.remove('hidden');
+        updateLoginFields();
+    }
+
+    function getCurrentUser() {
+        try {
+            return JSON.parse(sessionStorage.getItem('currentUser'));
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function getLocalDateKey() {
+        const now = new Date();
+        const localDate = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+        return localDate.toISOString().slice(0, 10);
+    }
+
+    function isAdmin() {
+        const user = getCurrentUser();
+        return Boolean(user && user.role === 'admin');
+    }
+
+    async function changeAdminCredentials() {
+        if (!isAdmin()) {
+            alert('Only an authenticated admin can change admin credentials.');
+            logout();
+            return;
+        }
+
+        const msg = document.getElementById('credentials-msg');
+        const currentPassword = document.getElementById('admin-current-password').value;
+        const newName = document.getElementById('admin-new-name').value.trim();
+        const newPassword = document.getElementById('admin-new-password').value;
+        const confirmPassword = document.getElementById('admin-confirm-password').value;
+        const credentials = JSON.parse(localStorage.getItem('adminCredentials'));
+
+        if (!currentPassword || !newName || !newPassword || !confirmPassword) {
+            msg.style.color = '#dc2626';
+            msg.innerText = 'Complete all fields to update the admin login.';
+            return;
+        }
+        if (newPassword.length < 8) {
+            msg.style.color = '#dc2626';
+            msg.innerText = 'The new password must be at least 8 characters.';
+            return;
+        }
+        if (newPassword !== confirmPassword) {
+            msg.style.color = '#dc2626';
+            msg.innerText = 'The new passwords do not match.';
+            return;
+        }
+
+        try {
+            if (await hashPassword(currentPassword, credentials.salt) !== credentials.passwordHash) {
+                msg.style.color = '#dc2626';
+                msg.innerText = 'Current password is incorrect.';
+                return;
+            }
+            const salt = createSalt();
+            const updatedCredentials = {
+                name: newName,
+                salt,
+                passwordHash: await hashPassword(newPassword, salt)
+            };
+            localStorage.setItem('adminCredentials', JSON.stringify(updatedCredentials));
+            sessionStorage.setItem('currentUser', JSON.stringify({ name: newName, role: 'admin' }));
+            document.getElementById('admin-current-password').value = '';
+            document.getElementById('admin-new-name').value = '';
+            document.getElementById('admin-new-password').value = '';
+            document.getElementById('admin-confirm-password').value = '';
+            msg.style.color = '#16a34a';
+            msg.innerText = 'Admin login updated successfully.';
+        } catch (error) {
+            msg.style.color = '#dc2626';
+            msg.innerText = error.message || 'Could not update admin credentials.';
+        }
     }
 </script>
 
