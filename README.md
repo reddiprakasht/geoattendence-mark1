@@ -68,6 +68,10 @@ Install dependencies and open the project folder in VS Code:
 npm install
 ```
 
+Netlify builds the app with `npm run build` and publishes the generated `dist` directory.
+Set `VITE_ATTENDANCE_API_URL` in the Netlify site environment variables to the deployed Apps
+Script web app URL before deploying, then trigger a new deploy when changing that value.
+
 VS Code starts the HTTPS development server when the workspace opens. If prompted, allow automatic tasks for this workspace. Configure the Apps Script URL above, then open `https://localhost:5173/` on this computer; the server must be running for the page to load. To start it manually instead, run `npm.cmd run dev` in a Windows terminal (or `npm run dev` on other platforms). The server uses port 5173 and reports an error instead of silently switching ports if that port is already in use.
 
 The development server listens on local and network interfaces and prints the current network URL to open on a phone. The local certificate authority and development certificates are stored under `%USERPROFILE%\.copilot\certificates\geoattendance-local-https`.
