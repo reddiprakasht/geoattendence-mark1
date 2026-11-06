@@ -65,7 +65,17 @@ function retainAttendanceHistory(attendance) {
 
 export function getCurrentUser() {
   try {
-    return JSON.parse(sessionStorage.getItem('currentUser'));
+    const user = JSON.parse(sessionStorage.getItem('currentUser'));
+    if (
+      !user ||
+      typeof user.name !== 'string' ||
+      !['worker', 'admin'].includes(user.role) ||
+      typeof user.sessionToken !== 'string' ||
+      !user.sessionToken
+    ) {
+      return null;
+    }
+    return user;
   } catch {
     return null;
   }

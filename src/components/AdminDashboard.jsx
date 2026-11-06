@@ -1,13 +1,19 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { getAttendanceRows } from '../utils/attendance.js';
 import { hasConfiguredGeofence, isValidGeofencePolygon } from '../utils/geofence.js';
 import { parseGoogleMapsLocation } from '../utils/googleMaps.js';
 import {
   addWorkerAccount,
+  assignStoredDocument,
+  deleteStoredDocument,
+  getStoredDocument,
   getWorkerAccounts,
   getSharedGeofence,
+  listStoredDocuments,
   removeWorkerAccount,
   saveSharedGeofence,
+  uploadStoredDocument,
 } from '../utils/sheetsApi.js';
 import GeofenceMap from './GeofenceMap.jsx';
 import {
@@ -19,8 +25,31 @@ import {
 } from '../utils/storage.js';
 
 const PLANTS = ['Plant 1', 'Plant 2'];
+const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
+const DOCUMENT_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+const DOCUMENT_PLANTS = [
+  { value: 'power-plant', label: 'POWER PLANT' },
+  { value: 'brine-plant', label: 'BRINE PLANT' },
+  { value: 'hcl-plant', label: 'HCL PLANT' },
+  { value: 'cell-house', label: 'CELL HOUSE' },
+  { value: 'fatty-acid', label: 'FATTY ACID' },
+  { value: 'fussion-plant', label: 'FUSSION PLANT' },
+  { value: 'cms-mech', label: 'CMS MECH' },
+  { value: 'cms-process', label: 'CMS PROCESS' },
+];
+const DOCUMENT_CONTRACTORS = [
+  { value: 'k-chalapathi-works', label: 'K.CHALAPATHI WORKS' },
+  { value: 'k-venkatamallapa-naidu', label: 'K. VENKATAMALLAPA NAIDU' },
+  { value: 't-reddy-prakash', label: 'T.REDDY PRAKASH' },
+  { value: 't-nagarajamma', label: 'T.NAGARAJAMMA' },
+  { value: 'v-venkataramana', label: 'V.VENKATARAMANA' },
+  { value: 'k-siva-rani', label: 'K.SIVA RANI' },
+  { value: 'v-lakshmi-devi', label: 'V.LAKSHMI DEVI' },
+  { value: 'mahadeva-experts', label: 'MAHADEVA EXPERTS' },
+];
 
 export default function AdminDashboard({ user, onLogout }) {
+  const [activeSection, setActiveSection] = useState('attendance');
   const [geofence, setGeofenceForm] = useState(getGeofence());
   const [polygonPoints, setPolygonPoints] = useState(() =>
     Array.isArray(geofence?.polygon) ? geofence.polygon : [],
@@ -49,15 +78,128 @@ export default function AdminDashboard({ user, onLogout }) {
   const [workerAccounts, setWorkerAccounts] = useState([]);
   const [workersLoading, setWorkersLoading] = useState(true);
   const [removingWorker, setRemovingWorker] = useState('');
+  const [removalTarget, setRemovalTarget] = useState(null);
+  const [removalPassword, setRemovalPassword] = useState('');
+  const [removalError, setRemovalError] = useState('');
   const [plantFilter, setPlantFilter] = useState('all');
   const [workerStatusFilter, setWorkerStatusFilter] = useState('all');
   const [plantSupportReady, setPlantSupportReady] = useState(false);
+  const [documentMonth, setDocumentMonth] = useState(() => getLocalDateKey().slice(0, 7));
+  const [documentCategory, setDocumentCategory] = useState('bill-copy');
+  const [documentWorkType, setDocumentWorkType] = useState('steam-line');
+  const [documentPlantFilter, setDocumentPlantFilter] = useState('all');
+  const [documentContractorFilter, setDocumentContractorFilter] = useState('all');
+  const [documentUploadPlant, setDocumentUploadPlant] = useState('');
+  const [documentUploadContractor, setDocumentUploadContractor] = useState('');
+  const [documents, setDocuments] = useState([]);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
+  const [documentMessage, setDocumentMessage] = useState({ text: '', type: 'info' });
+  const [documentUploading, setDocumentUploading] = useState(false);
+  const [previewingDocument, setPreviewingDocument] = useState('');
+  const [documentPreview, setDocumentPreview] = useState(null);
+  const [documentPreviewError, setDocumentPreviewError] = useState('');
+  const [documentDeleteTarget, setDocumentDeleteTarget] = useState(null);
+  const [documentDeletePassword, setDocumentDeletePassword] = useState('');
+  const [documentDeleteError, setDocumentDeleteError] = useState('');
+  const [deletingDocument, setDeletingDocument] = useState(false);
+  const [documentAssignmentTarget, setDocumentAssignmentTarget] = useState(null);
+  const [documentAssignmentWorkType, setDocumentAssignmentWorkType] = useState('steam-line');
+  const [documentAssignmentPlant, setDocumentAssignmentPlant] = useState('');
+  const [documentAssignmentContractor, setDocumentAssignmentContractor] = useState('');
+  const [documentAssignmentError, setDocumentAssignmentError] = useState('');
+  const [assigningDocument, setAssigningDocument] = useState(false);
+  const documentFileInput = useRef(null);
 
   useEffect(() => {
     loadAttendance(getLocalDateKey());
     loadSharedBoundary();
     loadWorkerAccounts();
   }, []);
+
+  useEffect(() => {
+    if (!removalTarget || removingWorker) return undefined;
+
+    function handleDialogKeyDown(event) {
+      if (event.key === 'Escape') closeRemovalDialog();
+    }
+
+    window.addEventListener('keydown', handleDialogKeyDown);
+    return () => window.removeEventListener('keydown', handleDialogKeyDown);
+  }, [removalTarget, removingWorker]);
+
+  useEffect(() => {
+    if (activeSection !== 'documents') return undefined;
+    let active = true;
+    setDocumentsLoading(true);
+    setDocumentMessage({ text: '', type: 'info' });
+    listStoredDocuments(user.sessionToken, documentMonth)
+      .then((response) => {
+        if (!Array.isArray(response) || response.some((document) =>
+          !document ||
+          typeof document.id !== 'string' ||
+          typeof document.name !== 'string' ||
+          !['bill-copy', 'work-order'].includes(document.category) ||
+          !['steam-line', 'manpower-supply', 'uncategorized'].includes(document.workType) ||
+          ![...DOCUMENT_PLANTS.map((plant) => plant.value), 'uncategorized'].includes(document.plant) ||
+          ![...DOCUMENT_CONTRACTORS.map((contractor) => contractor.value), 'uncategorized'].includes(document.contractor) ||
+          !DOCUMENT_MIME_TYPES.includes(document.mimeType) ||
+          typeof document.size !== 'number' ||
+          typeof document.createdAt !== 'string'
+        )) {
+          throw new Error('The saved documents response was invalid.');
+        }
+        if (active) setDocuments(response);
+      })
+      .catch((error) => {
+        if (active) {
+          setDocuments([]);
+          setDocumentMessage({
+            text: error instanceof Error ? error.message : 'Could not load saved documents.',
+            type: 'error',
+          });
+        }
+      })
+      .finally(() => {
+        if (active) setDocumentsLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [activeSection, documentMonth, user.sessionToken]);
+
+  useEffect(() => {
+    if (!documentPreview) return undefined;
+
+    function handlePreviewKeyDown(event) {
+      if (event.key === 'Escape') setDocumentPreview(null);
+    }
+
+    window.addEventListener('keydown', handlePreviewKeyDown);
+    return () => window.removeEventListener('keydown', handlePreviewKeyDown);
+  }, [documentPreview]);
+
+  useEffect(() => {
+    if (!documentDeleteTarget || deletingDocument) return undefined;
+
+    function handleDeleteKeyDown(event) {
+      if (event.key === 'Escape') closeDocumentDeleteDialog();
+    }
+
+    window.addEventListener('keydown', handleDeleteKeyDown);
+    return () => window.removeEventListener('keydown', handleDeleteKeyDown);
+  }, [documentDeleteTarget, deletingDocument]);
+
+  useEffect(() => {
+    if (!documentAssignmentTarget || assigningDocument) return undefined;
+
+    function handleAssignmentKeyDown(event) {
+      if (event.key === 'Escape') closeDocumentAssignmentDialog();
+    }
+
+    window.addEventListener('keydown', handleAssignmentKeyDown);
+    return () => window.removeEventListener('keydown', handleAssignmentKeyDown);
+  }, [documentAssignmentTarget, assigningDocument]);
 
   function updateGeofenceField(field, value) {
     setGeofenceForm((current) => ({ ...current, [field]: value }));
@@ -341,17 +483,269 @@ export default function AdminDashboard({ user, onLogout }) {
     }
   }
 
-  async function deleteWorkerAccount(account) {
+  async function uploadDocument(event) {
+    event.preventDefault();
     if (!ensureAdmin()) return;
-    const confirmed = window.confirm(
-      `Remove ${account.name} (${account.punchingNumber})? They will no longer be able to sign in.`,
-    );
-    if (!confirmed) return;
 
-    setRemovingWorker(account.punchingNumber);
-    setAccountMessage({ text: `Removing ${account.name}...`, type: 'info' });
+    const file = documentFileInput.current?.files?.[0];
+    if (!file) {
+      setDocumentMessage({ text: 'Choose a bill copy or work order to upload.', type: 'error' });
+      return;
+    }
+    if (file.size > MAX_DOCUMENT_BYTES) {
+      setDocumentMessage({ text: 'Each document must be 8 MB or smaller.', type: 'error' });
+      return;
+    }
+    if (!DOCUMENT_MIME_TYPES.includes(file.type)) {
+      setDocumentMessage({
+        text: 'Choose a JPG, PNG, WebP image, or PDF file.',
+        type: 'error',
+      });
+      return;
+    }
+    if (!documentUploadPlant || !documentUploadContractor) {
+      setDocumentMessage({
+        text: 'Choose a plant and contractor before uploading.',
+        type: 'error',
+      });
+      return;
+    }
+
+    setDocumentUploading(true);
+    setDocumentMessage({ text: 'Uploading document...', type: 'info' });
     try {
-      await removeWorkerAccount(user.sessionToken, account.punchingNumber);
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          if (typeof reader.result !== 'string') {
+            reject(new Error('The selected document could not be read.'));
+            return;
+          }
+          resolve(reader.result.slice(reader.result.indexOf(',') + 1));
+        };
+        reader.onerror = () => reject(reader.error || new Error('The selected document could not be read.'));
+        reader.readAsDataURL(file);
+      });
+      const savedDocument = await uploadStoredDocument(user.sessionToken, {
+        month: documentMonth,
+        category: documentCategory,
+        workType: documentWorkType,
+        plant: documentUploadPlant,
+        contractor: documentUploadContractor,
+        name: file.name,
+        mimeType: file.type,
+        base64,
+      });
+      if (
+        savedDocument &&
+        typeof savedDocument.id === 'string' &&
+        typeof savedDocument.name === 'string' &&
+        (
+          savedDocument.plant !== documentUploadPlant ||
+          savedDocument.contractor !== documentUploadContractor
+        )
+      ) {
+        throw new Error(
+          'The document may already be saved, but the deployed Apps Script did not return its plant and contractor assignments. Update apps-script/Code.gs and deploy a new web app version, then check this month before uploading again to avoid a duplicate.',
+        );
+      }
+      if (
+        !savedDocument ||
+        typeof savedDocument.id !== 'string' ||
+        typeof savedDocument.name !== 'string' ||
+        !['bill-copy', 'work-order'].includes(savedDocument.category) ||
+        savedDocument.workType !== documentWorkType ||
+        savedDocument.plant !== documentUploadPlant ||
+        savedDocument.contractor !== documentUploadContractor ||
+        !DOCUMENT_MIME_TYPES.includes(savedDocument.mimeType) ||
+        typeof savedDocument.size !== 'number' ||
+        typeof savedDocument.createdAt !== 'string'
+      ) {
+        throw new Error('The saved document response was invalid.');
+      }
+      setDocuments((current) => [savedDocument, ...current]);
+      setDocumentMessage({ text: `${file.name} was saved for ${documentMonth}.`, type: 'success' });
+      if (documentFileInput.current) documentFileInput.current.value = '';
+    } catch (error) {
+      setDocumentMessage({
+        text: error instanceof Error ? error.message : 'Could not upload the document.',
+        type: 'error',
+      });
+    } finally {
+      setDocumentUploading(false);
+    }
+  }
+
+  async function openDocumentPreview(document) {
+    if (!ensureAdmin()) return;
+
+    setPreviewingDocument(document.id);
+    setDocumentPreviewError('');
+    try {
+      const content = await getStoredDocument(user.sessionToken, document.id);
+      if (
+        !content ||
+        content.id !== document.id ||
+        content.name !== document.name ||
+        content.mimeType !== document.mimeType ||
+        typeof content.base64 !== 'string' ||
+        !content.base64
+      ) {
+        throw new Error('The document preview response was invalid.');
+      }
+      setDocumentPreview({
+        ...document,
+        dataUrl: `data:${content.mimeType};base64,${content.base64}`,
+      });
+    } catch (error) {
+      setDocumentPreviewError(
+        error instanceof Error ? error.message : 'Could not open this document.',
+      );
+    } finally {
+      setPreviewingDocument('');
+    }
+  }
+
+  function openDocumentAssignmentDialog(document) {
+    if (!ensureAdmin()) return;
+    setDocumentAssignmentTarget(document);
+    setDocumentAssignmentWorkType(
+      document.workType === 'manpower-supply' ? 'manpower-supply' : 'steam-line',
+    );
+    setDocumentAssignmentPlant(
+      document.plant === 'uncategorized' ? '' : document.plant,
+    );
+    setDocumentAssignmentContractor(
+      document.contractor === 'uncategorized' ? '' : document.contractor,
+    );
+    setDocumentAssignmentError('');
+  }
+
+  function closeDocumentAssignmentDialog() {
+    if (assigningDocument) return;
+    setDocumentAssignmentTarget(null);
+    setDocumentAssignmentError('');
+  }
+
+  async function saveDocumentAssignment(event) {
+    event.preventDefault();
+    if (!ensureAdmin() || !documentAssignmentTarget) return;
+
+    setAssigningDocument(true);
+    setDocumentAssignmentError('');
+    try {
+      const updatedDocument = await assignStoredDocument(user.sessionToken, {
+        month: documentMonth,
+        fileId: documentAssignmentTarget.id,
+        category: documentAssignmentTarget.category,
+        workType: documentAssignmentWorkType,
+        plant: documentAssignmentPlant,
+        contractor: documentAssignmentContractor,
+      });
+      if (
+        !updatedDocument ||
+        updatedDocument.id !== documentAssignmentTarget.id ||
+        updatedDocument.category !== documentAssignmentTarget.category ||
+        updatedDocument.workType !== documentAssignmentWorkType ||
+        updatedDocument.plant !== documentAssignmentPlant ||
+        updatedDocument.contractor !== documentAssignmentContractor
+      ) {
+        throw new Error('The document assignment response was invalid.');
+      }
+
+      setDocuments((current) => current.map((document) =>
+        document.id === updatedDocument.id ? { ...document, ...updatedDocument } : document,
+      ));
+      setDocumentAssignmentTarget(null);
+      setDocumentMessage({
+        text: `${updatedDocument.name} was organized successfully.`,
+        type: 'success',
+      });
+    } catch (error) {
+      setDocumentAssignmentError(
+        error instanceof Error ? error.message : 'Could not organize the document.',
+      );
+    } finally {
+      setAssigningDocument(false);
+    }
+  }
+
+  function openDocumentDeleteDialog(document) {
+    if (!ensureAdmin()) return;
+    setDocumentDeleteTarget(document);
+    setDocumentDeletePassword('');
+    setDocumentDeleteError('');
+  }
+
+  function closeDocumentDeleteDialog() {
+    if (deletingDocument) return;
+    setDocumentDeleteTarget(null);
+    setDocumentDeletePassword('');
+    setDocumentDeleteError('');
+  }
+
+  async function confirmDocumentDeletion(event) {
+    event.preventDefault();
+    if (!ensureAdmin() || !documentDeleteTarget) return;
+
+    setDeletingDocument(true);
+    setDocumentDeleteError('');
+    try {
+      const result = await deleteStoredDocument(
+        user.sessionToken,
+        documentMonth,
+        documentDeleteTarget.id,
+        documentDeleteTarget.category,
+        documentDeleteTarget.workType,
+        documentDeleteTarget.plant,
+        documentDeleteTarget.contractor,
+        documentDeletePassword,
+      );
+      if (!result || result.id !== documentDeleteTarget.id || result.deleted !== true) {
+        throw new Error('The document deletion response was invalid.');
+      }
+
+      setDocuments((current) =>
+        current.filter((document) => document.id !== documentDeleteTarget.id),
+      );
+      setDocumentMessage({
+        text: `${documentDeleteTarget.name} was moved to Google Drive trash.`,
+        type: 'success',
+      });
+      setDocumentDeleteTarget(null);
+      setDocumentDeletePassword('');
+    } catch (error) {
+      setDocumentDeleteError(
+        error instanceof Error ? error.message : 'Could not delete the document.',
+      );
+    } finally {
+      setDeletingDocument(false);
+    }
+  }
+
+  function openRemovalDialog(account) {
+    if (!ensureAdmin()) return;
+    setRemovalTarget(account);
+    setRemovalPassword('');
+    setRemovalError('');
+  }
+
+  function closeRemovalDialog() {
+    if (removingWorker) return;
+    setRemovalTarget(null);
+    setRemovalPassword('');
+    setRemovalError('');
+  }
+
+  async function confirmWorkerRemoval(event) {
+    event.preventDefault();
+    if (!ensureAdmin() || !removalTarget) return;
+
+    const account = removalTarget;
+    setRemovingWorker(account.punchingNumber);
+    setRemovalError('');
+    try {
+      await removeWorkerAccount(user.sessionToken, account.punchingNumber, removalPassword);
       setWorkerAccounts((current) =>
         current.filter((worker) => worker.punchingNumber !== account.punchingNumber),
       );
@@ -359,11 +753,10 @@ export default function AdminDashboard({ user, onLogout }) {
         text: `${account.name} was removed. Their existing attendance records are retained.`,
         type: 'success',
       });
+      setRemovalTarget(null);
+      setRemovalPassword('');
     } catch (error) {
-      setAccountMessage({
-        text: error instanceof Error ? error.message : 'Could not remove the worker account.',
-        type: 'error',
-      });
+      setRemovalError(error instanceof Error ? error.message : 'Could not remove the worker account.');
     } finally {
       setRemovingWorker('');
     }
@@ -402,6 +795,26 @@ export default function AdminDashboard({ user, onLogout }) {
     const isPresent = getWorkerAttendanceStatus(account.punchingNumber) === 'Present';
     return workerStatusFilter === 'present' ? isPresent : !isPresent;
   });
+  const filteredDocuments = documents.filter(
+    (document) =>
+      document.category === documentCategory &&
+      document.workType === documentWorkType &&
+      (documentPlantFilter === 'all' || document.plant === documentPlantFilter) &&
+      (documentContractorFilter === 'all' ||
+        document.contractor === documentContractorFilter),
+  );
+  const documentCategoryLabel = documentCategory === 'bill-copy' ? 'bill copy' : 'work order';
+  const documentWorkTypeLabels = {
+    'steam-line': 'Steam Line',
+    'manpower-supply': 'Manpower Supply',
+    uncategorized: 'Uncategorized',
+  };
+  const documentWorkTypeLabel = documentWorkTypeLabels[documentWorkType];
+  const documentPlantLabel = (value) =>
+    DOCUMENT_PLANTS.find((plant) => plant.value === value)?.label || 'Uncategorized';
+  const documentContractorLabel = (value) =>
+    DOCUMENT_CONTRACTORS.find((contractor) => contractor.value === value)?.label ||
+    'Uncategorized';
 
   return (
     <section className="admin-page">
@@ -416,15 +829,46 @@ export default function AdminDashboard({ user, onLogout }) {
       </header>
 
       <nav className="admin-nav" aria-label="Admin sections">
-        <a href="#geofence-panel" className="nav-pill">
+        <button
+          id="geofence-tab"
+          type="button"
+          className={`nav-pill ${activeSection === 'geofence' ? 'active' : ''}`}
+          aria-pressed={activeSection === 'geofence'}
+          aria-controls="admin-content-panel"
+          onClick={() => setActiveSection('geofence')}
+        >
           Geofence
-        </a>
-        <a href="#attendance-panel" className="nav-pill">
+        </button>
+        <button
+          id="attendance-tab"
+          type="button"
+          className={`nav-pill ${activeSection === 'attendance' ? 'active' : ''}`}
+          aria-pressed={activeSection === 'attendance'}
+          aria-controls="admin-content-panel"
+          onClick={() => setActiveSection('attendance')}
+        >
           Attendance
-        </a>
-        <a href="#security-panel" className="nav-pill">
+        </button>
+        <button
+          id="accounts-tab"
+          type="button"
+          className={`nav-pill ${activeSection === 'accounts' ? 'active' : ''}`}
+          aria-pressed={activeSection === 'accounts'}
+          aria-controls="admin-content-panel"
+          onClick={() => setActiveSection('accounts')}
+        >
           Accounts
-        </a>
+        </button>
+        <button
+          id="documents-tab"
+          type="button"
+          className={`nav-pill ${activeSection === 'documents' ? 'active' : ''}`}
+          aria-pressed={activeSection === 'documents'}
+          aria-controls="admin-content-panel"
+          onClick={() => setActiveSection('documents')}
+        >
+          Documents
+        </button>
       </nav>
 
       <div className="stats-grid">
@@ -442,8 +886,12 @@ export default function AdminDashboard({ user, onLogout }) {
         </div>
       </div>
 
-      <div className="admin-panels">
-        <section id="geofence-panel" className="panel-card">
+      <section
+        id="admin-content-panel"
+        className="admin-panels"
+        aria-labelledby={`${activeSection}-tab`}
+      >
+        {activeSection === 'geofence' && <section className="panel-card">
           <div className="panel-heading">
             <h2>Geofence Setup</h2>
             <span className="panel-tag">Office boundary</span>
@@ -525,9 +973,9 @@ export default function AdminDashboard({ user, onLogout }) {
               {geofenceMessage.text}
             </p>
           </form>
-        </section>
+        </section>}
 
-        <section id="attendance-panel" className="panel-card">
+        {activeSection === 'attendance' && <section className="panel-card">
           <div className="panel-heading">
             <h2>Attendance History</h2>
             <span className="panel-tag">Past 3 months</span>
@@ -596,9 +1044,9 @@ export default function AdminDashboard({ user, onLogout }) {
               </tbody>
             </table>
           </div>
-        </section>
+        </section>}
 
-        <section id="security-panel" className="panel-card">
+        {activeSection === 'accounts' && <section className="panel-card">
           <div className="panel-heading">
             <h2>Worker Accounts</h2>
             <span className="panel-tag">Administrator</span>
@@ -674,10 +1122,10 @@ export default function AdminDashboard({ user, onLogout }) {
                       <button
                         className="danger-btn"
                         type="button"
-                        onClick={() => deleteWorkerAccount(account)}
+                        onClick={() => openRemovalDialog(account)}
                         disabled={Boolean(removingWorker)}
                       >
-                        {removingWorker === account.punchingNumber ? 'Removing...' : 'Remove'}
+                        Remove
                       </button>
                     </td>
                   </tr>
@@ -731,8 +1179,475 @@ export default function AdminDashboard({ user, onLogout }) {
               {accountMessage.text}
             </p>
           </form>
-        </section>
-      </div>
+        </section>}
+
+        {activeSection === 'documents' && <section className="panel-card">
+          <div className="panel-heading">
+            <h2>Monthly Documents</h2>
+            <span className="panel-tag">Bills &amp; work orders</span>
+          </div>
+          <p className="section-copy">
+            Upload and view private bill copies and work orders here. Documents are stored securely
+            and organized by month; only administrators can access them.
+          </p>
+          <div className="document-category-nav" role="group" aria-label="Document category">
+            <button
+              type="button"
+              className={`nav-pill ${documentCategory === 'bill-copy' ? 'active' : ''}`}
+              aria-pressed={documentCategory === 'bill-copy'}
+              onClick={() => setDocumentCategory('bill-copy')}
+            >
+              Bill Copies
+            </button>
+            <button
+              type="button"
+              className={`nav-pill ${documentCategory === 'work-order' ? 'active' : ''}`}
+              aria-pressed={documentCategory === 'work-order'}
+              onClick={() => setDocumentCategory('work-order')}
+            >
+              Work Orders
+            </button>
+          </div>
+          <div className="document-work-type-nav" role="group" aria-label="Work type">
+            <button
+              type="button"
+              className={`nav-pill ${documentWorkType === 'steam-line' ? 'active' : ''}`}
+              aria-pressed={documentWorkType === 'steam-line'}
+              onClick={() => setDocumentWorkType('steam-line')}
+            >
+              Steam Line
+            </button>
+            <button
+              type="button"
+              className={`nav-pill ${documentWorkType === 'manpower-supply' ? 'active' : ''}`}
+              aria-pressed={documentWorkType === 'manpower-supply'}
+              onClick={() => setDocumentWorkType('manpower-supply')}
+            >
+              Manpower Supply
+            </button>
+            <button
+              type="button"
+              className={`nav-pill ${documentWorkType === 'uncategorized' ? 'active' : ''}`}
+              aria-pressed={documentWorkType === 'uncategorized'}
+              onClick={() => setDocumentWorkType('uncategorized')}
+            >
+              Uncategorized
+            </button>
+          </div>
+          <form className="document-upload-form" onSubmit={uploadDocument}>
+            <p className="document-upload-label">
+              {documentWorkType === 'uncategorized'
+                ? 'Select Steam Line or Manpower Supply before uploading a document.'
+                : `Upload a ${documentWorkTypeLabel} ${documentCategoryLabel} for ${documentMonth}`}
+            </p>
+            <label htmlFor="document-upload-plant">Plant:</label>
+            <select
+              id="document-upload-plant"
+              value={documentUploadPlant}
+              disabled={documentUploading}
+              required
+              onChange={(event) => setDocumentUploadPlant(event.target.value)}
+            >
+              <option value="">Choose plant</option>
+              {DOCUMENT_PLANTS.map((plant) => (
+                <option key={plant.value} value={plant.value}>{plant.label}</option>
+              ))}
+            </select>
+            <label htmlFor="document-upload-contractor">Contractor:</label>
+            <select
+              id="document-upload-contractor"
+              value={documentUploadContractor}
+              disabled={documentUploading}
+              required
+              onChange={(event) => setDocumentUploadContractor(event.target.value)}
+            >
+              <option value="">Choose contractor</option>
+              {DOCUMENT_CONTRACTORS.map((contractor) => (
+                <option key={contractor.value} value={contractor.value}>{contractor.label}</option>
+              ))}
+            </select>
+            <label htmlFor="document-file">Choose an image or PDF (8 MB max):</label>
+            <input
+              ref={documentFileInput}
+              id="document-file"
+              type="file"
+              accept="image/jpeg,image/png,image/webp,application/pdf"
+              required
+              disabled={documentUploading}
+            />
+            <button
+              type="submit"
+              disabled={
+                documentUploading ||
+                documentWorkType === 'uncategorized' ||
+                !documentUploadPlant ||
+                !documentUploadContractor
+              }
+            >
+              {documentUploading
+                ? 'Uploading...'
+                : `Upload ${documentWorkTypeLabel} ${documentCategoryLabel}`}
+            </button>
+          </form>
+          <p className={`admin-msg message-${documentMessage.type}`} role="status" aria-live="polite">
+            {documentMessage.text}
+          </p>
+          {documentPreviewError && (
+            <p className="admin-msg message-error" role="alert">
+              {documentPreviewError}
+            </p>
+          )}
+          <div className="document-filters">
+            <div>
+              <label htmlFor="document-plant-filter">Filter by plant:</label>
+              <select
+                id="document-plant-filter"
+                value={documentPlantFilter}
+                onChange={(event) => setDocumentPlantFilter(event.target.value)}
+              >
+                <option value="all">All plants</option>
+                {DOCUMENT_PLANTS.map((plant) => (
+                  <option key={plant.value} value={plant.value}>{plant.label}</option>
+                ))}
+                <option value="uncategorized">Uncategorized</option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="document-contractor-filter">Filter by contractor:</label>
+              <select
+                id="document-contractor-filter"
+                value={documentContractorFilter}
+                onChange={(event) => setDocumentContractorFilter(event.target.value)}
+              >
+                <option value="all">All contractors</option>
+                {DOCUMENT_CONTRACTORS.map((contractor) => (
+                  <option key={contractor.value} value={contractor.value}>{contractor.label}</option>
+                ))}
+                <option value="uncategorized">Uncategorized</option>
+              </select>
+            </div>
+          </div>
+          <div className="document-month-picker">
+            <label htmlFor="document-month">Choose month:</label>
+            <input
+              id="document-month"
+              type="month"
+              value={documentMonth}
+              disabled={documentUploading}
+              onChange={(event) => {
+                if (event.target.value) setDocumentMonth(event.target.value);
+              }}
+            />
+          </div>
+          {documentsLoading ? (
+            <p className="section-copy">Loading documents for {documentMonth}...</p>
+          ) : filteredDocuments.length > 0 ? (
+            <div
+              className="document-list"
+              aria-label={`${documentCategory === 'bill-copy' ? 'Bill copies' : 'Work orders'} for ${documentMonth}`}
+            >
+              {filteredDocuments.map((document) => (
+                <article className="document-card" key={document.id}>
+                  <div className="document-card-copy">
+                    <span className="document-category">
+                      {documentWorkTypeLabels[document.workType]} · {documentPlantLabel(document.plant)} ·{' '}
+                      {documentContractorLabel(document.contractor)}
+                    </span>
+                    <strong title={document.name}>
+                      {document.name}
+                      <span className="document-file-category">
+                        {document.category === 'bill-copy' ? 'Bill copy' : 'Work order'}
+                      </span>
+                    </strong>
+                    <span className="document-meta">
+                      {new Date(document.createdAt).toLocaleDateString()} ·{' '}
+                      {document.size < 1024 * 1024
+                        ? `${Math.max(1, Math.round(document.size / 1024))} KB`
+                        : `${(document.size / (1024 * 1024)).toFixed(1)} MB`}
+                    </span>
+                  </div>
+                  <div className="document-actions">
+                    {(document.workType === 'uncategorized' ||
+                      document.plant === 'uncategorized' ||
+                      document.contractor === 'uncategorized') && (
+                      <button
+                        className="secondary-btn document-view-btn"
+                        type="button"
+                        onClick={() => openDocumentAssignmentDialog(document)}
+                        disabled={Boolean(assigningDocument)}
+                      >
+                        Organize
+                      </button>
+                    )}
+                    <button
+                      className="secondary-btn document-view-btn"
+                      type="button"
+                      onClick={() => openDocumentPreview(document)}
+                      disabled={Boolean(previewingDocument) || Boolean(deletingDocument)}
+                    >
+                      {previewingDocument === document.id ? 'Opening...' : 'View'}
+                    </button>
+                    <button
+                      className="danger-btn document-delete-btn"
+                      type="button"
+                      onClick={() => openDocumentDeleteDialog(document)}
+                      disabled={Boolean(deletingDocument) || Boolean(previewingDocument)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            !documentMessage.text && (
+              <p className="document-empty">
+                No {documentWorkTypeLabel.toLowerCase()} {documentCategory === 'bill-copy' ? 'bill copies' : 'work orders'} saved for {documentMonth} yet.
+                Upload one above to add it here.
+              </p>
+            )
+          )}
+        </section>}
+      </section>
+      {removalTarget && createPortal(
+        <div
+          className="confirm-overlay"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeRemovalDialog();
+          }}
+        >
+          <section
+            className="confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="remove-worker-title"
+            aria-describedby="remove-worker-description"
+          >
+            <h2 id="remove-worker-title">Confirm worker removal</h2>
+            <p id="remove-worker-description">
+              Remove {removalTarget.name} ({removalTarget.punchingNumber})? Enter your administrator
+              password to confirm. Their attendance history will be retained.
+            </p>
+            <form onSubmit={confirmWorkerRemoval}>
+              <label htmlFor="remove-worker-password">Administrator password</label>
+              <input
+                id="remove-worker-password"
+                type="password"
+                autoComplete="current-password"
+                maxLength={128}
+                autoFocus
+                required
+                value={removalPassword}
+                onChange={(event) => {
+                  setRemovalPassword(event.target.value);
+                  setRemovalError('');
+                }}
+              />
+              {removalError && (
+                <p className="admin-msg message-error" role="alert">
+                  {removalError}
+                </p>
+              )}
+              <div className="confirm-dialog-actions">
+                <button
+                  className="secondary-btn"
+                  type="button"
+                  onClick={closeRemovalDialog}
+                  disabled={Boolean(removingWorker)}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="danger-confirm-btn" disabled={Boolean(removingWorker)}>
+                  {removingWorker ? 'Removing...' : 'Confirm removal'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>,
+        document.body,
+      )}
+      {documentAssignmentTarget && createPortal(
+        <div
+          className="confirm-overlay"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeDocumentAssignmentDialog();
+          }}
+        >
+          <section
+            className="confirm-dialog document-assignment-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="organize-document-title"
+          >
+            <h2 id="organize-document-title">Organize document</h2>
+            <p>{documentAssignmentTarget.name}</p>
+            <form onSubmit={saveDocumentAssignment}>
+              <label htmlFor="assign-document-work-type">Work type</label>
+              <select
+                id="assign-document-work-type"
+                value={documentAssignmentWorkType}
+                onChange={(event) => setDocumentAssignmentWorkType(event.target.value)}
+                required
+              >
+                <option value="steam-line">Steam Line</option>
+                <option value="manpower-supply">Manpower Supply</option>
+              </select>
+              <label htmlFor="assign-document-plant">Plant</label>
+              <select
+                id="assign-document-plant"
+                value={documentAssignmentPlant}
+                onChange={(event) => setDocumentAssignmentPlant(event.target.value)}
+                required
+              >
+                <option value="">Choose plant</option>
+                {DOCUMENT_PLANTS.map((plant) => (
+                  <option key={plant.value} value={plant.value}>{plant.label}</option>
+                ))}
+              </select>
+              <label htmlFor="assign-document-contractor">Contractor</label>
+              <select
+                id="assign-document-contractor"
+                value={documentAssignmentContractor}
+                onChange={(event) => setDocumentAssignmentContractor(event.target.value)}
+                required
+              >
+                <option value="">Choose contractor</option>
+                {DOCUMENT_CONTRACTORS.map((contractor) => (
+                  <option key={contractor.value} value={contractor.value}>{contractor.label}</option>
+                ))}
+              </select>
+              {documentAssignmentError && (
+                <p className="admin-msg message-error" role="alert">
+                  {documentAssignmentError}
+                </p>
+              )}
+              <div className="confirm-dialog-actions">
+                <button
+                  className="secondary-btn"
+                  type="button"
+                  onClick={closeDocumentAssignmentDialog}
+                  disabled={assigningDocument}
+                >
+                  Cancel
+                </button>
+                <button type="submit" disabled={assigningDocument || !documentAssignmentPlant || !documentAssignmentContractor}>
+                  {assigningDocument ? 'Saving...' : 'Save categories'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>,
+        document.body,
+      )}
+      {documentDeleteTarget && createPortal(
+        <div
+          className="confirm-overlay"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeDocumentDeleteDialog();
+          }}
+        >
+          <section
+            className="confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-document-title"
+            aria-describedby="delete-document-description"
+          >
+            <h2 id="delete-document-title">Delete saved document?</h2>
+            <p id="delete-document-description">
+              Move {documentDeleteTarget.name} to Google Drive trash? Enter your administrator
+              password to confirm. You can restore it from Drive trash.
+            </p>
+            <form onSubmit={confirmDocumentDeletion}>
+              <label htmlFor="delete-document-password">Administrator password</label>
+              <input
+                id="delete-document-password"
+                type="password"
+                autoComplete="current-password"
+                maxLength={128}
+                autoFocus
+                required
+                value={documentDeletePassword}
+                onChange={(event) => {
+                  setDocumentDeletePassword(event.target.value);
+                  setDocumentDeleteError('');
+                }}
+              />
+              {documentDeleteError && (
+                <p className="admin-msg message-error" role="alert">
+                  {documentDeleteError}
+                </p>
+              )}
+              <div className="confirm-dialog-actions">
+                <button
+                  className="secondary-btn"
+                  type="button"
+                  onClick={closeDocumentDeleteDialog}
+                  disabled={deletingDocument}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="danger-confirm-btn"
+                  disabled={deletingDocument}
+                >
+                  {deletingDocument ? 'Deleting...' : 'Confirm delete'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>,
+        document.body,
+      )}
+      {documentPreview && createPortal(
+        <div
+          className="confirm-overlay document-preview-overlay"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setDocumentPreview(null);
+          }}
+        >
+          <section
+            className="document-preview-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="document-preview-title"
+          >
+            <header className="document-preview-header">
+              <h2 id="document-preview-title">{documentPreview.name}</h2>
+              <button
+                className="secondary-btn document-close-btn"
+                type="button"
+                onClick={() => setDocumentPreview(null)}
+                aria-label="Close document preview"
+              >
+                Close
+              </button>
+            </header>
+            {documentPreview.mimeType === 'application/pdf' ? (
+              <iframe
+                className="document-pdf-preview"
+                src={documentPreview.dataUrl}
+                title={`Preview of ${documentPreview.name}`}
+              />
+            ) : (
+              <img
+                className="document-image-preview"
+                src={documentPreview.dataUrl}
+                alt={documentPreview.name}
+              />
+            )}
+            <a
+              className="document-download"
+              href={documentPreview.dataUrl}
+              download={documentPreview.name}
+            >
+              Download document
+            </a>
+          </section>
+        </div>,
+        document.body,
+      )}
     </section>
   );
 }

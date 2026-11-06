@@ -2,10 +2,10 @@ import { useState } from 'react';
 import AdminDashboard from './components/AdminDashboard.jsx';
 import LoginView from './components/LoginView.jsx';
 import WorkerDashboard from './components/WorkerDashboard.jsx';
-import { saveCurrentUser } from './utils/storage.js';
+import { getCurrentUser, saveCurrentUser } from './utils/storage.js';
 
 export default function App() {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState(getCurrentUser);
 
   function handleLogin(nextUser) {
     saveCurrentUser(nextUser);

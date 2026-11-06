@@ -1,6 +1,6 @@
 const apiUrl = import.meta.env.VITE_ATTENDANCE_API_URL?.trim();
 
-export function requestSheetsApi(payload) {
+export function requestSheetsApi(payload, timeoutMs = 30000) {
   if (!apiUrl) {
     return Promise.reject(
       new Error('Google Sheets is not configured. Follow the setup steps in README.md.'),
@@ -68,7 +68,14 @@ export function requestSheetsApi(payload) {
       if (message.response.ok) {
         resolve(message.response.result);
       } else {
-        reject(new Error(message.response.error || 'Google Sheets request failed.'));
+        const unsupportedDocumentsAction =
+          message.response.error === 'Unsupported request.' &&
+          ['listDocuments', 'uploadDocument', 'getDocument', 'deleteDocument', 'assignDocument'].includes(payload.action);
+        reject(new Error(
+          unsupportedDocumentsAction
+            ? 'Document storage is not enabled in the deployed Apps Script. Save the updated Code.gs, run prepareDocumentsFolder once to authorize Drive, then deploy a new version of the existing web app.'
+            : message.response.error || 'Google Sheets request failed.',
+        ));
       }
     }
 
@@ -78,7 +85,7 @@ export function requestSheetsApi(payload) {
       reject(new Error(
         'Google Sheets did not respond. Check the Apps Script deployment URL and try again.',
       ));
-    }, 30000);
+    }, timeoutMs);
 
     document.body.append(iframe, form);
     form.submit();
@@ -101,6 +108,48 @@ export function getWorkerAccounts(sessionToken) {
   return requestSheetsApi({ action: 'getWorkers', sessionToken });
 }
 
-export function removeWorkerAccount(sessionToken, punchingNumber) {
-  return requestSheetsApi({ action: 'removeWorker', sessionToken, punchingNumber });
+export function removeWorkerAccount(sessionToken, punchingNumber, adminPassword) {
+  return requestSheetsApi({ action: 'removeWorker', sessionToken, punchingNumber, adminPassword });
+}
+
+export function listStoredDocuments(sessionToken, month) {
+  return requestSheetsApi({ action: 'listDocuments', sessionToken, month });
+}
+
+export function uploadStoredDocument(sessionToken, document) {
+  return requestSheetsApi(
+    { action: 'uploadDocument', sessionToken, ...document },
+    120000,
+  );
+}
+
+export function getStoredDocument(sessionToken, fileId) {
+  return requestSheetsApi({ action: 'getDocument', sessionToken, fileId });
+}
+
+export function assignStoredDocument(sessionToken, document) {
+  return requestSheetsApi({ action: 'assignDocument', sessionToken, ...document });
+}
+
+export function deleteStoredDocument(
+  sessionToken,
+  month,
+  fileId,
+  category,
+  workType,
+  plant,
+  contractor,
+  adminPassword,
+) {
+  return requestSheetsApi({
+    action: 'deleteDocument',
+    sessionToken,
+    month,
+    fileId,
+    category,
+    workType,
+    plant,
+    contractor,
+    adminPassword,
+  });
 }

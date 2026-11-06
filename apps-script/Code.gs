@@ -3,6 +3,30 @@ const ATTENDANCE_SHEET = 'Attendance';
 const SESSION_TTL_SECONDS = 21600;
 const PASSWORD_HASH_ITERATIONS = 10000;
 const PLANTS = ['Plant 1', 'Plant 2'];
+const DOCUMENTS_FOLDER_NAME = 'GeoAttend Documents';
+const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
+const DOCUMENT_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+const DOCUMENT_WORK_TYPES = ['steam-line', 'manpower-supply', 'uncategorized'];
+const DOCUMENT_PLANTS = [
+  'power-plant',
+  'brine-plant',
+  'hcl-plant',
+  'cell-house',
+  'fatty-acid',
+  'fussion-plant',
+  'cms-mech',
+  'cms-process',
+];
+const DOCUMENT_CONTRACTORS = [
+  'k-chalapathi-works',
+  'k-venkatamallapa-naidu',
+  't-reddy-prakash',
+  't-nagarajamma',
+  'v-venkataramana',
+  'k-siva-rani',
+  'v-lakshmi-devi',
+  'mahadeva-experts',
+];
 
 function doPost(event) {
   let payload = {};
@@ -53,6 +77,19 @@ function prepareWorkerPasswords() {
   return 'Passwords hashed and cleared from the Workers tab.';
 }
 
+function prepareDocumentsFolder() {
+  const properties = PropertiesService.getScriptProperties();
+  const existingId = properties.getProperty('DOCUMENTS_FOLDER_ID');
+  if (existingId) {
+    const existingFolder = DriveApp.getFolderById(existingId);
+    return 'Private document storage is ready: ' + existingFolder.getName();
+  }
+
+  const folder = DriveApp.createFolder(DOCUMENTS_FOLDER_NAME);
+  properties.setProperty('DOCUMENTS_FOLDER_ID', folder.getId());
+  return 'Private document storage is ready: ' + folder.getName();
+}
+
 function handleRequest_(payload) {
   if (!payload || typeof payload.action !== 'string') {
     throw new Error('Invalid request.');
@@ -75,7 +112,34 @@ function handleRequest_(payload) {
   }
   if (payload.action === 'removeWorker') {
     if (session.role !== 'admin') throw new Error('Only administrators can remove worker accounts.');
+    verifyAdminPassword_(session, payload.adminPassword);
     return removeWorker_(payload);
+  }
+  if (payload.action === 'listDocuments') {
+    if (session.role !== 'admin') throw new Error('Only administrators can view documents.');
+    assertActiveAdmin_(session);
+    return listDocuments_(payload.month);
+  }
+  if (payload.action === 'uploadDocument') {
+    if (session.role !== 'admin') throw new Error('Only administrators can upload documents.');
+    assertActiveAdmin_(session);
+    return uploadDocument_(payload);
+  }
+  if (payload.action === 'assignDocument') {
+    if (session.role !== 'admin') throw new Error('Only administrators can organize documents.');
+    assertActiveAdmin_(session);
+    return assignDocument_(payload);
+  }
+  if (payload.action === 'getDocument') {
+    if (session.role !== 'admin') throw new Error('Only administrators can view documents.');
+    assertActiveAdmin_(session);
+    return getDocument_(payload.fileId);
+  }
+  if (payload.action === 'deleteDocument') {
+    if (session.role !== 'admin') throw new Error('Only administrators can delete documents.');
+    assertActiveAdmin_(session);
+    verifyAdminPassword_(session, payload.adminPassword);
+    return deleteDocument_(payload);
   }
   if (payload.action === 'getGeofence') {
     const storedGeofence = PropertiesService.getScriptProperties().getProperty('SHARED_GEOFENCE');
@@ -91,6 +155,304 @@ function handleRequest_(payload) {
   }
 
   throw new Error('Unsupported request.');
+}
+
+function validateDocumentMonth_(month) {
+  if (typeof month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    throw new Error('Choose a valid document month.');
+  }
+  return month;
+}
+
+function assertActiveAdmin_(session) {
+  const sheet = getWorkersSheet_();
+  const headers = getHeaders_(sheet);
+  const numberColumn = columnIndex_(headers, 'Punching Number');
+  const nameColumn = columnIndex_(headers, 'Name');
+  const roleColumn = columnIndex_(headers, 'Role');
+  const hashColumn = columnIndex_(headers, 'Password Hash');
+  const matches = sheet.getDataRange().getDisplayValues().slice(1).filter(function (row) {
+    return row[numberColumn].trim() === session.punchingNumber;
+  });
+  if (
+    matches.length !== 1 ||
+    matches[0][roleColumn].trim().toLowerCase() !== 'admin' ||
+    matches[0][nameColumn].trim() !== session.name ||
+    matches[0][hashColumn] !== session.passwordHash
+  ) {
+    throw new Error('This administrator account is no longer active. Please sign in again.');
+  }
+}
+
+function getDocumentsFolder_() {
+  const folderId = PropertiesService.getScriptProperties().getProperty('DOCUMENTS_FOLDER_ID');
+  if (!folderId) {
+    throw new Error('Document storage is not ready. An administrator must run prepareDocumentsFolder in Apps Script.');
+  }
+  return DriveApp.getFolderById(folderId);
+}
+
+function getMonthFolder_(rootFolder, month, createIfMissing) {
+  const folders = rootFolder.getFoldersByName(month);
+  if (folders.hasNext()) return folders.next();
+  return createIfMissing ? rootFolder.createFolder(month) : null;
+}
+
+function listDocuments_(monthValue) {
+  const month = validateDocumentMonth_(monthValue);
+  const monthFolder = getMonthFolder_(getDocumentsFolder_(), month, false);
+  if (!monthFolder) return [];
+
+  const files = monthFolder.getFiles();
+  const documents = [];
+  while (files.hasNext()) {
+    const file = files.next();
+    const mimeType = file.getMimeType();
+    if (DOCUMENT_MIME_TYPES.indexOf(mimeType) < 0) continue;
+
+    const metadata = parseDocumentMetadata_(file.getDescription());
+    if (!metadata) continue;
+
+    documents.push({
+      id: file.getId(),
+      name: file.getName(),
+      category: metadata.category,
+      workType: metadata.workType,
+      plant: metadata.plant,
+      contractor: metadata.contractor,
+      mimeType: mimeType,
+      size: file.getSize(),
+      createdAt: file.getDateCreated().toISOString(),
+    });
+  }
+  documents.sort(function (first, second) {
+    return second.createdAt.localeCompare(first.createdAt);
+  });
+  return documents;
+}
+
+function uploadDocument_(payload) {
+  const month = validateDocumentMonth_(payload.month);
+  const category = payload.category;
+  const workType = payload.workType;
+  const plant = payload.plant;
+  const contractor = payload.contractor;
+  const name = typeof payload.name === 'string' ? payload.name.trim() : '';
+  const mimeType = payload.mimeType;
+  const encoded = payload.base64;
+  if (category !== 'bill-copy' && category !== 'work-order') {
+    throw new Error('Choose Bills or Work orders for this document.');
+  }
+  if (DOCUMENT_WORK_TYPES.indexOf(workType) < 0 || workType === 'uncategorized') {
+    throw new Error('Choose Steam Line or Manpower Supply for this document.');
+  }
+  validateDocumentAssignments_(plant, contractor);
+  if (!name || name.length > 180 || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw new Error('Choose a valid file name (up to 180 characters).');
+  }
+  if (DOCUMENT_MIME_TYPES.indexOf(mimeType) < 0) {
+    throw new Error('Upload a JPG, PNG, WebP image, or PDF file.');
+  }
+  if (typeof encoded !== 'string' || !encoded ||
+      encoded.length > 4 * Math.ceil(MAX_DOCUMENT_BYTES / 3)) {
+    throw new Error('Each document must be smaller than 8 MB.');
+  }
+
+  let bytes;
+  try {
+    bytes = Utilities.base64Decode(encoded);
+  } catch (error) {
+    throw new Error('The selected document could not be read. Choose it again and retry.');
+  }
+  if (!bytes.length || bytes.length > MAX_DOCUMENT_BYTES) {
+    throw new Error('Each document must be 8 MB or smaller.');
+  }
+  if (!matchesDocumentSignature_(bytes, mimeType)) {
+    throw new Error('The file contents do not match a supported image or PDF type.');
+  }
+
+  const folder = getMonthFolder_(getDocumentsFolder_(), month, true);
+  const blob = Utilities.newBlob(bytes, mimeType, name);
+  const file = folder.createFile(blob);
+  file.setDescription(formatDocumentMetadata_({
+    category: category,
+    workType: workType,
+    plant: plant,
+    contractor: contractor,
+  }));
+  return {
+    id: file.getId(),
+    name: file.getName(),
+    category: category,
+    workType: workType,
+    plant: plant,
+    contractor: contractor,
+    mimeType: mimeType,
+    size: file.getSize(),
+    createdAt: file.getDateCreated().toISOString(),
+  };
+}
+
+function parseDocumentMetadata_(description) {
+  const value = typeof description === 'string' ? description : '';
+  const match = value.match(
+    /^geoattendance-category:(bill-copy|work-order)(?:;work-type:(steam-line|manpower-supply))?(?:;plant:([a-z0-9-]+);contractor:([a-z0-9-]+))?$/
+  );
+  if (!match) return null;
+  return {
+    category: match[1],
+    workType: match[2] || 'uncategorized',
+    plant: match[3] || 'uncategorized',
+    contractor: match[4] || 'uncategorized',
+  };
+}
+
+function validateDocumentAssignments_(plant, contractor) {
+  if (DOCUMENT_PLANTS.indexOf(plant) < 0) {
+    throw new Error('Choose a valid plant for this document.');
+  }
+  if (DOCUMENT_CONTRACTORS.indexOf(contractor) < 0) {
+    throw new Error('Choose a valid contractor for this document.');
+  }
+}
+
+function formatDocumentMetadata_(metadata) {
+  return 'geoattendance-category:' + metadata.category +
+    ';work-type:' + metadata.workType +
+    ';plant:' + metadata.plant +
+    ';contractor:' + metadata.contractor;
+}
+
+function matchesDocumentSignature_(bytes, mimeType) {
+  if (mimeType === 'application/pdf') {
+    return bytes.length >= 5 && bytes[0] === 37 && bytes[1] === 80 &&
+      bytes[2] === 68 && bytes[3] === 70 && bytes[4] === 45;
+  }
+  if (mimeType === 'image/jpeg') {
+    return bytes.length >= 3 && (bytes[0] & 255) === 255 &&
+      (bytes[1] & 255) === 216 && (bytes[2] & 255) === 255;
+  }
+  if (mimeType === 'image/png') {
+    return bytes.length >= 8 && (bytes[0] & 255) === 137 && bytes[1] === 80 &&
+      bytes[2] === 78 && bytes[3] === 71 && bytes[4] === 13 &&
+      bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10;
+  }
+  return mimeType === 'image/webp' && bytes.length >= 12 &&
+    bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 70 &&
+    bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80;
+}
+
+function getDocument_(fileId) {
+  if (typeof fileId !== 'string' || !/^[a-zA-Z0-9_-]{10,}$/.test(fileId)) {
+    throw new Error('Choose a valid document.');
+  }
+
+  const rootFolder = getDocumentsFolder_();
+  const monthFolders = rootFolder.getFolders();
+  while (monthFolders.hasNext()) {
+    const monthFolder = monthFolders.next();
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthFolder.getName())) continue;
+    const files = monthFolder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      if (file.getId() !== fileId) continue;
+      if (DOCUMENT_MIME_TYPES.indexOf(file.getMimeType()) < 0 ||
+          file.getSize() > MAX_DOCUMENT_BYTES) {
+        throw new Error('This document cannot be previewed in the app.');
+      }
+      return {
+        id: file.getId(),
+        name: file.getName(),
+        mimeType: file.getMimeType(),
+        base64: Utilities.base64Encode(file.getBlob().getBytes()),
+      };
+    }
+  }
+  throw new Error('That document could not be found.');
+}
+
+function deleteDocument_(payload) {
+  const month = validateDocumentMonth_(payload.month);
+  const fileId = payload.fileId;
+  if (typeof fileId !== 'string' || !/^[a-zA-Z0-9_-]{10,}$/.test(fileId)) {
+    throw new Error('Choose a valid document.');
+  }
+
+  const monthFolder = getMonthFolder_(getDocumentsFolder_(), month, false);
+  if (!monthFolder) throw new Error('That document could not be found in the selected month.');
+  const files = monthFolder.getFiles();
+  while (files.hasNext()) {
+    const file = files.next();
+    if (file.getId() !== fileId) continue;
+
+    const metadata = parseDocumentMetadata_(file.getDescription());
+    if (
+      DOCUMENT_MIME_TYPES.indexOf(file.getMimeType()) < 0 ||
+      !metadata ||
+      metadata.category !== payload.category ||
+      metadata.workType !== payload.workType ||
+      metadata.plant !== payload.plant ||
+      metadata.contractor !== payload.contractor
+    ) {
+      throw new Error('This document does not belong to the selected document categories.');
+    }
+
+    file.setTrashed(true);
+    return { id: fileId, deleted: true };
+  }
+  throw new Error('That document could not be found in the selected month.');
+}
+
+function assignDocument_(payload) {
+  const month = validateDocumentMonth_(payload.month);
+  const fileId = payload.fileId;
+  const category = payload.category;
+  const workType = payload.workType;
+  const plant = payload.plant;
+  const contractor = payload.contractor;
+  if (typeof fileId !== 'string' || !/^[a-zA-Z0-9_-]{10,}$/.test(fileId)) {
+    throw new Error('Choose a valid document.');
+  }
+  if (category !== 'bill-copy' && category !== 'work-order') {
+    throw new Error('Choose a valid document type.');
+  }
+  if (workType !== 'steam-line' && workType !== 'manpower-supply') {
+    throw new Error('Choose a valid work type.');
+  }
+  validateDocumentAssignments_(plant, contractor);
+
+  const monthFolder = getMonthFolder_(getDocumentsFolder_(), month, false);
+  if (!monthFolder) throw new Error('That document could not be found in the selected month.');
+  const files = monthFolder.getFiles();
+  while (files.hasNext()) {
+    const file = files.next();
+    if (file.getId() !== fileId) continue;
+
+    const metadata = parseDocumentMetadata_(file.getDescription());
+    if (
+      DOCUMENT_MIME_TYPES.indexOf(file.getMimeType()) < 0 ||
+      !metadata ||
+      metadata.category !== category
+    ) {
+      throw new Error('This file is not a supported document in the selected category.');
+    }
+
+    const updatedMetadata = {
+      category: category,
+      workType: workType,
+      plant: plant,
+      contractor: contractor,
+    };
+    file.setDescription(formatDocumentMetadata_(updatedMetadata));
+    return Object.assign({
+      id: file.getId(),
+      name: file.getName(),
+      mimeType: file.getMimeType(),
+      size: file.getSize(),
+      createdAt: file.getDateCreated().toISOString(),
+    }, updatedMetadata);
+  }
+  throw new Error('That document could not be found in the selected month.');
 }
 
 function addWorker_(payload) {
@@ -396,6 +758,38 @@ function isPointInGeofence_(latitude, longitude, geofence) {
     Math.sin(longitudeDelta / 2) ** 2;
   const distance = 6371000 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
   return distance <= geofence.radius;
+}
+
+function verifyAdminPassword_(session, password) {
+  if (typeof password !== 'string' || !password || password.length > 128) {
+    throw new Error('Enter your administrator password.');
+  }
+
+  const cache = CacheService.getScriptCache();
+  const attemptKey = 'remove-confirm:' + digest_(session.punchingNumber);
+  const attempts = Number(cache.get(attemptKey) || 0);
+  if (attempts >= 5) {
+    throw new Error('Too many incorrect confirmations. Try again in 15 minutes.');
+  }
+
+  const sheet = getWorkersSheet_();
+  const headers = getHeaders_(sheet);
+  const numberColumn = columnIndex_(headers, 'Punching Number');
+  const roleColumn = columnIndex_(headers, 'Role');
+  const hashColumn = columnIndex_(headers, 'Password Hash');
+  const matches = sheet.getDataRange().getDisplayValues().slice(1).filter(function (row) {
+    return row[numberColumn].trim() === session.punchingNumber;
+  });
+  if (
+    matches.length !== 1 ||
+    matches[0][roleColumn].trim().toLowerCase() !== 'admin' ||
+    !verifyPassword_(password, matches[0][hashColumn])
+  ) {
+    cache.put(attemptKey, String(attempts + 1), 900);
+    throw new Error('Incorrect administrator password.');
+  }
+
+  cache.remove(attemptKey);
 }
 
 function getAttendanceRows_(dateKey) {

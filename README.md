@@ -42,11 +42,24 @@ written to the `Workers` sheet. Removing an account preserves existing attendanc
 future sign-ins, and invalidates that worker's active attendance session. Passwords are hashed by
 Apps Script and are never saved in plaintext. Only accounts with the `Admin` role can manage workers
 or read shared attendance; only active accounts with the `Worker` role can submit a punch.
+Removing a worker requires the administrator's current password, verified by Apps Script.
 The Accounts plant dropdown filters workers and sets the plant for new accounts; choose Plant 1 or
 Plant 2 before creating a worker. Existing workers without a plant are shown as Unassigned; enter
 their plant in the `Plant` column of the private `Workers` sheet. Plant names can be changed in the
 `PLANTS` list in the application and Apps Script code, then deployed again. Plants are administrative
 labels only and share the same factory geofence.
+
+Administrators can upload bill copies and work orders from the **Documents** section. Files are
+stored in a private `GeoAttend Documents` folder in the Apps Script owner's Google Drive, grouped
+into monthly folders, and separated in the app by Bill Copies or Work Orders, Steam Line or
+Manpower Supply, plant, and contractor. Previously uploaded files without those assignments appear
+under Uncategorized and can be organized from the app. Files can be previewed, downloaded, or moved
+to Drive trash inside the app. Deleting a file requires the administrator's current password.
+Supported files are JPG, PNG, WebP, and PDF, up to 8 MB each. To authorize private Drive storage, select and run
+`prepareDocumentsFolder` once in the Apps Script editor and approve the requested Drive access.
+After changing `Code.gs`, deploy a new version of the existing Apps Script web app. Documents are
+served only through admin-authenticated app requests; do not make the Drive folder public.
+
 The `Attendance` tab is created automatically and stores one record per worker per date;
 repeat punches update that day's time. Apps Script sessions last up to six hours. Because the
 deployment is public, use strong, unique passwords and keep the spreadsheet private. Apps Script
