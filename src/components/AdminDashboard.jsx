@@ -109,6 +109,8 @@ export default function AdminDashboard({ user, onLogout }) {
   const [documentAssignmentError, setDocumentAssignmentError] = useState('');
   const [assigningDocument, setAssigningDocument] = useState(false);
   const documentFileInput = useRef(null);
+  const documentCameraInput = useRef(null);
+  const [documentFile, setDocumentFile] = useState(null);
 
   useEffect(() => {
     loadAttendance(getLocalDateKey());
@@ -487,7 +489,7 @@ export default function AdminDashboard({ user, onLogout }) {
     event.preventDefault();
     if (!ensureAdmin()) return;
 
-    const file = documentFileInput.current?.files?.[0];
+    const file = documentFile;
     if (!file) {
       setDocumentMessage({ text: 'Choose a bill copy or work order to upload.', type: 'error' });
       return;
@@ -566,6 +568,8 @@ export default function AdminDashboard({ user, onLogout }) {
       setDocuments((current) => [savedDocument, ...current]);
       setDocumentMessage({ text: `${file.name} was saved for ${documentMonth}.`, type: 'success' });
       if (documentFileInput.current) documentFileInput.current.value = '';
+      if (documentCameraInput.current) documentCameraInput.current.value = '';
+      setDocumentFile(null);
     } catch (error) {
       setDocumentMessage({
         text: error instanceof Error ? error.message : 'Could not upload the document.',
@@ -1272,9 +1276,36 @@ export default function AdminDashboard({ user, onLogout }) {
               id="document-file"
               type="file"
               accept="image/jpeg,image/png,image/webp,application/pdf"
-              required
               disabled={documentUploading}
+              onChange={(event) => setDocumentFile(event.target.files?.[0] || null)}
             />
+            <input
+              ref={documentCameraInput}
+              className="document-camera-input"
+              type="file"
+              accept="image/*"
+              capture="environment"
+              aria-label="Take a document photo with the camera"
+              disabled={documentUploading}
+              onChange={(event) => setDocumentFile(event.target.files?.[0] || null)}
+            />
+            <button
+              className="document-camera-button"
+              type="button"
+              disabled={documentUploading}
+              onClick={() => documentCameraInput.current?.click()}
+            >
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M4 7.5h3l1.5-2h7l1.5 2h3A1.5 1.5 0 0 1 21.5 9v9a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 18V9A1.5 1.5 0 0 1 4 7.5Z" />
+                <circle cx="12" cy="13" r="3.5" />
+              </svg>
+              Take photo
+            </button>
+            {documentFile && (
+              <p className="document-selected-file" aria-live="polite">
+                Selected: {documentFile.name}
+              </p>
+            )}
             <button
               type="submit"
               disabled={

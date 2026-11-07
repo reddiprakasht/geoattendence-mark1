@@ -957,6 +957,35 @@ th {
   background: #fff;
 }
 
+.document-upload-form .document-camera-input {
+  display: none;
+}
+
+.document-upload-form .document-camera-button {
+  width: fit-content;
+  margin: 0 0 14px;
+  border-color: #d7ddef;
+  background: #fff;
+  box-shadow: none;
+  color: #3f4dbd;
+}
+
+.document-camera-button svg {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.document-selected-file {
+  overflow-wrap: anywhere;
+  margin: -4px 0 14px;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+
 .document-upload-form button {
   margin: 0;
 }
