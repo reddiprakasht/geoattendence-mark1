@@ -13,6 +13,7 @@ import {
   listStoredDocuments,
   removeWorkerAccount,
   saveSharedGeofence,
+  assignWorkerAccount,
   uploadStoredDocument,
 } from '../utils/sheetsApi.js';
 import GeofenceMap from './GeofenceMap.jsx';
@@ -24,7 +25,6 @@ import {
   saveGeofence,
 } from '../utils/storage.js';
 
-const PLANTS = ['Plant 1', 'Plant 2'];
 const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
 const DOCUMENT_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 const DOCUMENT_PLANTS = [
@@ -63,6 +63,8 @@ export default function AdminDashboard({ user, onLogout }) {
   const [googleMapsInput, setGoogleMapsInput] = useState('');
   const [attendanceDate, setAttendanceDate] = useState(() => getLocalDateKey());
   const [attendanceRows, setAttendanceRows] = useState([]);
+  const [attendancePlantFilter, setAttendancePlantFilter] = useState('all');
+  const [attendanceContractorFilter, setAttendanceContractorFilter] = useState('all');
   const [attendanceMessage, setAttendanceMessage] = useState({
     text: 'Loading attendance...',
     type: 'info',
@@ -82,6 +84,11 @@ export default function AdminDashboard({ user, onLogout }) {
   const [removalPassword, setRemovalPassword] = useState('');
   const [removalError, setRemovalError] = useState('');
   const [plantFilter, setPlantFilter] = useState('all');
+  const [contractorFilter, setContractorFilter] = useState('all');
+  const [workerAccountPlant, setWorkerAccountPlant] = useState('');
+  const [workerAccountContractor, setWorkerAccountContractor] = useState('');
+  const [workerAssignmentDrafts, setWorkerAssignmentDrafts] = useState({});
+  const [savingWorkerAssignment, setSavingWorkerAssignment] = useState('');
   const [workerStatusFilter, setWorkerStatusFilter] = useState('all');
   const [plantSupportReady, setPlantSupportReady] = useState(false);
   const [documentMonth, setDocumentMonth] = useState(() => getLocalDateKey().slice(0, 7));
@@ -367,6 +374,19 @@ export default function AdminDashboard({ user, onLogout }) {
     setAttendanceMessage({ text: '', type: 'info' });
     try {
       const rows = await getAttendanceRows(dateKey, user.sessionToken);
+      if (!Array.isArray(rows) || rows.some((row) =>
+        !row ||
+        typeof row.punchingNumber !== 'string' ||
+        typeof row.name !== 'string' ||
+        typeof row.plant !== 'string' ||
+        typeof row.contractor !== 'string' ||
+        typeof row.status !== 'string' ||
+        typeof row.time !== 'string'
+      )) {
+        throw new Error(
+          'Plant and contractor attendance filters are not enabled in Apps Script. Update Code.gs and deploy a new version.',
+        );
+      }
       setAttendanceRows(rows);
     } catch (error) {
       setAttendanceMessage({
@@ -405,14 +425,23 @@ export default function AdminDashboard({ user, onLogout }) {
     if (!ensureAdmin()) return;
     if (!plantSupportReady) {
       setAccountMessage({
-        text: 'Update the Apps Script deployment to enable plant assignments before creating worker accounts.',
+        text: 'Update the Apps Script deployment to enable plant and contractor assignments before creating worker accounts.',
         type: 'error',
       });
       return;
     }
-    if (!PLANTS.includes(plantFilter)) {
+    if (!DOCUMENT_PLANTS.some((plant) => plant.value === workerAccountPlant)) {
       setAccountMessage({
-        text: 'Choose Plant 1 or Plant 2 in the plant dropdown before creating a worker.',
+        text: 'Choose a plant before creating a worker.',
+        type: 'error',
+      });
+      return;
+    }
+    if (!DOCUMENT_CONTRACTORS.some((contractor) =>
+      contractor.value === workerAccountContractor
+    )) {
+      setAccountMessage({
+        text: 'Choose a contractor before creating a worker.',
         type: 'error',
       });
       return;
@@ -422,7 +451,8 @@ export default function AdminDashboard({ user, onLogout }) {
       name: workerAccount.name.trim(),
       punchingNumber: workerAccount.punchingNumber.trim(),
       password: workerAccount.password,
-      plant: plantFilter,
+      plant: workerAccountPlant,
+      contractor: workerAccountContractor,
     };
     if (!account.name || !account.punchingNumber || !account.password) {
       setAccountMessage({ text: 'Complete all worker account fields.', type: 'error' });
@@ -438,6 +468,8 @@ export default function AdminDashboard({ user, onLogout }) {
     try {
       await addWorkerAccount(user.sessionToken, account);
       setWorkerAccount({ name: '', punchingNumber: '', password: '' });
+      setWorkerAccountPlant('');
+      setWorkerAccountContractor('');
       setAccountMessage({
         text: `Worker account created for ${account.name}. Give them their punching number and password.`,
         type: 'success',
@@ -459,9 +491,14 @@ export default function AdminDashboard({ user, onLogout }) {
     setPlantSupportReady(false);
     try {
       const response = await getWorkerAccounts(user.sessionToken);
-      if (!response || response.plantField !== true || !Array.isArray(response.workers)) {
+      if (
+        !response ||
+        response.plantField !== true ||
+        response.contractorField !== true ||
+        !Array.isArray(response.workers)
+      ) {
         throw new Error(
-          'Plant assignments are not enabled in the Apps Script deployment. Update Code.gs and deploy a new version.',
+          'Worker plant and contractor assignments are not enabled in Apps Script. Update Code.gs and deploy a new version.',
         );
       }
       const accounts = response.workers;
@@ -469,7 +506,8 @@ export default function AdminDashboard({ user, onLogout }) {
         !account ||
         typeof account.name !== 'string' ||
         typeof account.punchingNumber !== 'string' ||
-        typeof account.plant !== 'string'
+        typeof account.plant !== 'string' ||
+        typeof account.contractor !== 'string'
       )) {
         throw new Error('The worker list response was invalid. Contact your administrator.');
       }
@@ -482,6 +520,93 @@ export default function AdminDashboard({ user, onLogout }) {
       });
     } finally {
       setWorkersLoading(false);
+    }
+  }
+
+  function getWorkerAssignmentDraft(account) {
+    return workerAssignmentDrafts[account.punchingNumber] || {
+      plant: DOCUMENT_PLANTS.some((plant) => plant.value === account.plant)
+        ? account.plant
+        : '',
+      contractor: DOCUMENT_CONTRACTORS.some((contractor) =>
+        contractor.value === account.contractor
+      )
+        ? account.contractor
+        : '',
+    };
+  }
+
+  function updateWorkerAssignmentDraft(punchingNumber, field, value) {
+    const account = workerAccounts.find((worker) => worker.punchingNumber === punchingNumber);
+    if (!account) return;
+    setWorkerAssignmentDrafts((current) => {
+      const currentAssignment = current[punchingNumber] || {
+        plant: DOCUMENT_PLANTS.some((plant) => plant.value === account.plant)
+          ? account.plant
+          : '',
+        contractor: DOCUMENT_CONTRACTORS.some((contractor) =>
+          contractor.value === account.contractor
+        )
+          ? account.contractor
+          : '',
+      };
+      return {
+        ...current,
+        [punchingNumber]: {
+          ...currentAssignment,
+          [field]: value,
+        },
+      };
+    });
+  }
+
+  async function saveWorkerAssignment(account) {
+    if (!ensureAdmin()) return;
+    const assignment = getWorkerAssignmentDraft(account);
+    if (!assignment.plant || !assignment.contractor) {
+      setAccountMessage({
+        text: 'Choose both a plant and a contractor before saving this worker.',
+        type: 'error',
+      });
+      return;
+    }
+
+    setSavingWorkerAssignment(account.punchingNumber);
+    setAccountMessage({ text: '', type: 'info' });
+    try {
+      const result = await assignWorkerAccount(user.sessionToken, {
+        punchingNumber: account.punchingNumber,
+        ...assignment,
+      });
+      if (
+        !result ||
+        result.punchingNumber !== account.punchingNumber ||
+        result.plant !== assignment.plant ||
+        result.contractor !== assignment.contractor
+      ) {
+        throw new Error('The worker assignment response was invalid.');
+      }
+      setWorkerAccounts((current) => current.map((worker) =>
+        worker.punchingNumber === account.punchingNumber
+          ? { ...worker, ...assignment }
+          : worker
+      ));
+      setWorkerAssignmentDrafts((current) => {
+        const next = { ...current };
+        delete next[account.punchingNumber];
+        return next;
+      });
+      setAccountMessage({
+        text: `Plant and contractor saved for ${account.name}.`,
+        type: 'success',
+      });
+    } catch (error) {
+      setAccountMessage({
+        text: error instanceof Error ? error.message : 'Could not save worker assignments.',
+        type: 'error',
+      });
+    } finally {
+      setSavingWorkerAssignment('');
     }
   }
 
@@ -777,6 +902,19 @@ export default function AdminDashboard({ user, onLogout }) {
     attendanceRows.map((row) => [row.punchingNumber, row.status]),
   );
   const attendanceUnavailable = attendanceLoading || attendanceMessage.type === 'error';
+  const filteredAttendanceRows = attendanceRows.filter((row) => {
+    const matchesPlant =
+      attendancePlantFilter === 'all' ||
+      (attendancePlantFilter === 'unassigned'
+        ? !DOCUMENT_PLANTS.some((plant) => plant.value === row.plant)
+        : row.plant === attendancePlantFilter);
+    const matchesContractor =
+      attendanceContractorFilter === 'all' ||
+      (attendanceContractorFilter === 'unassigned'
+        ? !DOCUMENT_CONTRACTORS.some((contractor) => contractor.value === row.contractor)
+        : row.contractor === attendanceContractorFilter);
+    return matchesPlant && matchesContractor;
+  });
 
   function getWorkerAttendanceStatus(punchingNumber) {
     if (attendanceLoading) return 'Loading...';
@@ -790,10 +928,20 @@ export default function AdminDashboard({ user, onLogout }) {
     const matchesPlant =
       plantFilter === 'all' ||
       (plantFilter === 'unassigned'
-        ? !account.plant
+        ? !DOCUMENT_PLANTS.some((plant) => plant.value === account.plant)
         : account.plant === plantFilter);
-    if (!matchesPlant || workerStatusFilter === 'all' || attendanceUnavailable) {
-      return matchesPlant;
+    const matchesContractor =
+      contractorFilter === 'all' ||
+      (contractorFilter === 'unassigned'
+        ? !DOCUMENT_CONTRACTORS.some((contractor) => contractor.value === account.contractor)
+        : account.contractor === contractorFilter);
+    if (
+      !matchesPlant ||
+      !matchesContractor ||
+      workerStatusFilter === 'all' ||
+      attendanceUnavailable
+    ) {
+      return matchesPlant && matchesContractor;
     }
 
     const isPresent = getWorkerAttendanceStatus(account.punchingNumber) === 'Present';
@@ -819,6 +967,11 @@ export default function AdminDashboard({ user, onLogout }) {
   const documentContractorLabel = (value) =>
     DOCUMENT_CONTRACTORS.find((contractor) => contractor.value === value)?.label ||
     'Uncategorized';
+  const attendancePlantLabel = (value) =>
+    DOCUMENT_PLANTS.find((plant) => plant.value === value)?.label || 'Unassigned';
+  const attendanceContractorLabel = (value) =>
+    DOCUMENT_CONTRACTORS.find((contractor) => contractor.value === value)?.label ||
+    'Unassigned';
 
   return (
     <section className="admin-page">
@@ -1023,6 +1176,36 @@ export default function AdminDashboard({ user, onLogout }) {
               Refresh List
             </button>
           </div>
+          <div className="document-filters attendance-filters">
+            <div>
+              <label htmlFor="attendance-plant-filter">Filter by plant:</label>
+              <select
+                id="attendance-plant-filter"
+                value={attendancePlantFilter}
+                onChange={(event) => setAttendancePlantFilter(event.target.value)}
+              >
+                <option value="all">All plants</option>
+                {DOCUMENT_PLANTS.map((plant) => (
+                  <option key={plant.value} value={plant.value}>{plant.label}</option>
+                ))}
+                <option value="unassigned">Unassigned</option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="attendance-contractor-filter">Filter by contractor:</label>
+              <select
+                id="attendance-contractor-filter"
+                value={attendanceContractorFilter}
+                onChange={(event) => setAttendanceContractorFilter(event.target.value)}
+              >
+                <option value="all">All contractors</option>
+                {DOCUMENT_CONTRACTORS.map((contractor) => (
+                  <option key={contractor.value} value={contractor.value}>{contractor.label}</option>
+                ))}
+                <option value="unassigned">Unassigned</option>
+              </select>
+            </div>
+          </div>
           <p className={`admin-msg message-${attendanceMessage.type}`} role="status" aria-live="polite">
             {attendanceLoading ? 'Loading attendance...' : attendanceMessage.text}
           </p>
@@ -1031,20 +1214,29 @@ export default function AdminDashboard({ user, onLogout }) {
               <thead>
                 <tr>
                   <th>Name</th>
+                  <th>Plant</th>
+                  <th>Contractor</th>
                   <th>Status</th>
                   <th>Time</th>
                 </tr>
               </thead>
               <tbody>
-                {attendanceRows.map((row) => (
+                {filteredAttendanceRows.map((row) => (
                   <tr key={row.punchingNumber}>
                     <td>{row.name}</td>
+                    <td>{attendancePlantLabel(row.plant)}</td>
+                    <td>{attendanceContractorLabel(row.contractor)}</td>
                     <td className={row.status === 'Present' ? 'status-present' : 'status-absent'}>
                       {row.status}
                     </td>
                     <td>{row.time}</td>
                   </tr>
                 ))}
+                {!attendanceLoading && filteredAttendanceRows.length === 0 && (
+                  <tr>
+                    <td colSpan="5">No workers match these plant and contractor filters.</td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -1062,15 +1254,29 @@ export default function AdminDashboard({ user, onLogout }) {
           </p>
           <div className="worker-account-controls">
             <div>
-              <label htmlFor="plant-filter">Plant filter / new worker plant:</label>
+              <label htmlFor="plant-filter">Filter by plant:</label>
               <select
                 id="plant-filter"
                 value={plantFilter}
                 onChange={(event) => setPlantFilter(event.target.value)}
               >
                 <option value="all">All plants</option>
-                {PLANTS.map((plant) => (
-                  <option key={plant} value={plant}>{plant}</option>
+                {DOCUMENT_PLANTS.map((plant) => (
+                  <option key={plant.value} value={plant.value}>{plant.label}</option>
+                ))}
+                <option value="unassigned">Unassigned</option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="contractor-filter">Filter by contractor:</label>
+              <select
+                id="contractor-filter"
+                value={contractorFilter}
+                onChange={(event) => setContractorFilter(event.target.value)}
+              >
+                <option value="all">All contractors</option>
+                {DOCUMENT_CONTRACTORS.map((contractor) => (
+                  <option key={contractor.value} value={contractor.value}>{contractor.label}</option>
                 ))}
                 <option value="unassigned">Unassigned</option>
               </select>
@@ -1088,8 +1294,8 @@ export default function AdminDashboard({ user, onLogout }) {
               </select>
             </div>
             <p className="map-hint">
-              New workers use the selected plant. Attendance status is based on the selected date
-              in Attendance History.
+              Use the assignment selectors to categorize existing workers. Attendance status is
+              based on the selected date in Attendance History.
               {attendanceLoading ? ' Loading attendance...' : ''}
               {!attendanceLoading && attendanceMessage.type === 'error'
                 ? ' Attendance status could not be loaded.'
@@ -1103,6 +1309,7 @@ export default function AdminDashboard({ user, onLogout }) {
                   <th>Name</th>
                   <th>Punching Number</th>
                   <th>Plant</th>
+                  <th>Contractor</th>
                   <th>Status</th>
                   <th>Action</th>
                 </tr>
@@ -1112,7 +1319,42 @@ export default function AdminDashboard({ user, onLogout }) {
                   <tr key={account.punchingNumber}>
                     <td>{account.name}</td>
                     <td>{account.punchingNumber}</td>
-                    <td>{account.plant || 'Unassigned'}</td>
+                    <td>
+                      <select
+                        aria-label={`Plant for ${account.name}`}
+                        value={getWorkerAssignmentDraft(account).plant}
+                        disabled={savingWorkerAssignment === account.punchingNumber}
+                        onChange={(event) => updateWorkerAssignmentDraft(
+                          account.punchingNumber,
+                          'plant',
+                          event.target.value,
+                        )}
+                      >
+                        <option value="">Unassigned</option>
+                        {DOCUMENT_PLANTS.map((plant) => (
+                          <option key={plant.value} value={plant.value}>{plant.label}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        aria-label={`Contractor for ${account.name}`}
+                        value={getWorkerAssignmentDraft(account).contractor}
+                        disabled={savingWorkerAssignment === account.punchingNumber}
+                        onChange={(event) => updateWorkerAssignmentDraft(
+                          account.punchingNumber,
+                          'contractor',
+                          event.target.value,
+                        )}
+                      >
+                        <option value="">Unassigned</option>
+                        {DOCUMENT_CONTRACTORS.map((contractor) => (
+                          <option key={contractor.value} value={contractor.value}>
+                            {contractor.label}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
                     <td className={
                       attendanceUnavailable
                         ? ''
@@ -1123,23 +1365,37 @@ export default function AdminDashboard({ user, onLogout }) {
                       {getWorkerAttendanceStatus(account.punchingNumber)}
                     </td>
                     <td>
-                      <button
-                        className="danger-btn"
-                        type="button"
-                        onClick={() => openRemovalDialog(account)}
-                        disabled={Boolean(removingWorker)}
-                      >
-                        Remove
-                      </button>
+                      <div className="worker-account-actions">
+                        <button
+                          className="secondary-btn"
+                          type="button"
+                          onClick={() => saveWorkerAssignment(account)}
+                          disabled={
+                            savingWorkerAssignment === account.punchingNumber ||
+                            !getWorkerAssignmentDraft(account).plant ||
+                            !getWorkerAssignmentDraft(account).contractor
+                          }
+                        >
+                          {savingWorkerAssignment === account.punchingNumber ? 'Saving...' : 'Save'}
+                        </button>
+                        <button
+                          className="danger-btn"
+                          type="button"
+                          onClick={() => openRemovalDialog(account)}
+                          disabled={Boolean(removingWorker) || Boolean(savingWorkerAssignment)}
+                        >
+                          Remove
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
                 {!workersLoading && filteredWorkerAccounts.length === 0 && (
                   <tr>
-                    <td colSpan="5">
+                    <td colSpan="6">
                       {workerAccounts.length === 0
                         ? 'No worker accounts have been added.'
-                        : 'No workers match this plant.'}
+                        : 'No workers match these filters.'}
                     </td>
                   </tr>
                 )}
@@ -1148,6 +1404,28 @@ export default function AdminDashboard({ user, onLogout }) {
           </div>
           {workersLoading && <p className="section-copy">Loading worker accounts...</p>}
           <form onSubmit={createWorkerAccount}>
+            <label htmlFor="new-worker-plant">Worker plant:</label>
+            <select
+              id="new-worker-plant"
+              value={workerAccountPlant}
+              onChange={(event) => setWorkerAccountPlant(event.target.value)}
+            >
+              <option value="">Choose plant</option>
+              {DOCUMENT_PLANTS.map((plant) => (
+                <option key={plant.value} value={plant.value}>{plant.label}</option>
+              ))}
+            </select>
+            <label htmlFor="new-worker-contractor">Worker contractor:</label>
+            <select
+              id="new-worker-contractor"
+              value={workerAccountContractor}
+              onChange={(event) => setWorkerAccountContractor(event.target.value)}
+            >
+              <option value="">Choose contractor</option>
+              {DOCUMENT_CONTRACTORS.map((contractor) => (
+                <option key={contractor.value} value={contractor.value}>{contractor.label}</option>
+              ))}
+            </select>
             <label htmlFor="worker-name">Worker name:</label>
             <input
               id="worker-name"

@@ -2,7 +2,6 @@ const WORKERS_SHEET = 'Workers';
 const ATTENDANCE_SHEET = 'Attendance';
 const SESSION_TTL_SECONDS = 21600;
 const PASSWORD_HASH_ITERATIONS = 10000;
-const PLANTS = ['Plant 1', 'Plant 2'];
 const DOCUMENTS_FOLDER_NAME = 'GeoAttend Documents';
 const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
 const DOCUMENT_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
@@ -109,6 +108,11 @@ function handleRequest_(payload) {
   if (payload.action === 'getWorkers') {
     if (session.role !== 'admin') throw new Error('Only administrators can view worker accounts.');
     return getWorkers_();
+  }
+  if (payload.action === 'assignWorker') {
+    if (session.role !== 'admin') throw new Error('Only administrators can organize worker accounts.');
+    assertActiveAdmin_(session);
+    return assignWorker_(payload);
   }
   if (payload.action === 'removeWorker') {
     if (session.role !== 'admin') throw new Error('Only administrators can remove worker accounts.');
@@ -460,11 +464,15 @@ function addWorker_(payload) {
   const name = String(payload.name || '').trim();
   const password = String(payload.password || '');
   const plant = String(payload.plant || '').trim();
+  const contractor = String(payload.contractor || '').trim();
   if (!punchingNumber || punchingNumber.length > 100 || !name || name.length > 150) {
     throw new Error('Enter a valid worker name and punching number.');
   }
-  if (PLANTS.indexOf(plant) < 0) {
-    throw new Error('Choose Plant 1 or Plant 2 for the worker account.');
+  if (DOCUMENT_PLANTS.indexOf(plant) < 0) {
+    throw new Error('Choose a valid plant for the worker account.');
+  }
+  if (DOCUMENT_CONTRACTORS.indexOf(contractor) < 0) {
+    throw new Error('Choose a valid contractor for the worker account.');
   }
   if (/[\u0000-\u001f\u007f]/.test(punchingNumber) || /[\u0000-\u001f\u007f]/.test(name)) {
     throw new Error('Name and punching number cannot contain control characters.');
@@ -479,6 +487,7 @@ function addWorker_(payload) {
   try {
     const headers = getHeaders_(sheet);
     const plantColumn = ensurePlantColumn_(sheet, headers);
+    const contractorColumn = ensureContractorColumn_(sheet, headers);
     const numberColumn = columnIndex_(headers, 'Punching Number');
     const nameColumn = columnIndex_(headers, 'Name');
     const roleColumn = columnIndex_(headers, 'Role');
@@ -496,6 +505,7 @@ function addWorker_(payload) {
     row[nameColumn] = name;
     row[roleColumn] = 'Worker';
     row[plantColumn] = plant;
+    row[contractorColumn] = contractor;
     const salt = Utilities.getUuid().replace(/-/g, '');
     row[passwordColumn] = '';
     row[hashColumn] = salt + ':' + derivePasswordHash_(password, salt);
@@ -506,7 +516,13 @@ function addWorker_(payload) {
     lock.releaseLock();
   }
 
-  return { punchingNumber: punchingNumber, name: name, role: 'worker', plant: plant };
+  return {
+    punchingNumber: punchingNumber,
+    name: name,
+    role: 'worker',
+    plant: plant,
+    contractor: contractor,
+  };
 }
 
 function getWorkers_() {
@@ -516,6 +532,7 @@ function getWorkers_() {
   try {
     const headers = getHeaders_(sheet);
     const plantColumn = ensurePlantColumn_(sheet, headers);
+    const contractorColumn = ensureContractorColumn_(sheet, headers);
     const numberColumn = columnIndex_(headers, 'Punching Number');
     const nameColumn = columnIndex_(headers, 'Name');
     const roleColumn = columnIndex_(headers, 'Role');
@@ -529,9 +546,50 @@ function getWorkers_() {
           punchingNumber: row[numberColumn].trim(),
           name: row[nameColumn].trim(),
           plant: (row[plantColumn] || '').trim(),
+          contractor: (row[contractorColumn] || '').trim(),
         };
       });
-    return { plantField: true, workers: workers };
+    return { plantField: true, contractorField: true, workers: workers };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function assignWorker_(payload) {
+  const punchingNumber = String(payload.punchingNumber || '').trim();
+  const plant = String(payload.plant || '').trim();
+  const contractor = String(payload.contractor || '').trim();
+  if (!punchingNumber || punchingNumber.length > 100) {
+    throw new Error('Choose a valid worker account.');
+  }
+  if (DOCUMENT_PLANTS.indexOf(plant) < 0) {
+    throw new Error('Choose a valid plant for the worker account.');
+  }
+  if (DOCUMENT_CONTRACTORS.indexOf(contractor) < 0) {
+    throw new Error('Choose a valid contractor for the worker account.');
+  }
+
+  const sheet = getWorkersSheet_();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const headers = getHeaders_(sheet);
+    const plantColumn = ensurePlantColumn_(sheet, headers);
+    const contractorColumn = ensureContractorColumn_(sheet, headers);
+    const numberColumn = columnIndex_(headers, 'Punching Number');
+    const roleColumn = columnIndex_(headers, 'Role');
+    const rows = sheet.getDataRange().getDisplayValues();
+    const matches = rows.slice(1).map(function (row, index) {
+      return { row: row, sheetRow: index + 2 };
+    }).filter(function (entry) {
+      return entry.row[numberColumn].trim() === punchingNumber &&
+        entry.row[roleColumn].trim().toLowerCase() === 'worker';
+    });
+    if (matches.length !== 1) throw new Error('That worker account could not be found.');
+
+    sheet.getRange(matches[0].sheetRow, plantColumn + 1).setValue(plant);
+    sheet.getRange(matches[0].sheetRow, contractorColumn + 1).setValue(contractor);
+    return { punchingNumber: punchingNumber, plant: plant, contractor: contractor };
   } finally {
     lock.releaseLock();
   }
@@ -797,35 +855,46 @@ function getAttendanceRows_(dateKey) {
     throw new Error('Choose a valid attendance date.');
   }
 
-  const workers = getWorkersSheet_().getDataRange().getDisplayValues();
-  const workerHeaders = workers[0].map(normalizeHeader_);
-  const numberColumn = workerHeaders.indexOf('punching number');
-  const nameColumn = workerHeaders.indexOf('name');
-  const roleColumn = workerHeaders.indexOf('role');
-  if (numberColumn < 0 || nameColumn < 0 || roleColumn < 0) {
-    throw new Error('The Workers tab is missing required columns.');
-  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const workerSheet = getWorkersSheet_();
+    const workerHeaders = getHeaders_(workerSheet);
+    const plantColumn = ensurePlantColumn_(workerSheet, workerHeaders);
+    const contractorColumn = ensureContractorColumn_(workerSheet, workerHeaders);
+    const workers = workerSheet.getDataRange().getDisplayValues();
+    const numberColumn = columnIndex_(workerHeaders, 'Punching Number');
+    const nameColumn = columnIndex_(workerHeaders, 'Name');
+    const roleColumn = columnIndex_(workerHeaders, 'Role');
+    if (numberColumn < 0 || nameColumn < 0 || roleColumn < 0) {
+      throw new Error('The Workers tab is missing required columns.');
+    }
 
-  const records = new Map();
-  const attendance = getAttendanceSheet_().getDataRange().getDisplayValues();
-  attendance.slice(1).forEach(function (row) {
-    if (row[0] === dateKey) records.set(row[1], { status: row[3], time: row[4] });
-  });
-
-  return workers.slice(1)
-    .filter(function (row) {
-      return row[numberColumn].trim() && row[nameColumn].trim() &&
-        row[roleColumn].trim().toLowerCase() === 'worker';
-    })
-    .map(function (row) {
-      const record = records.get(row[numberColumn].trim());
-      return {
-        punchingNumber: row[numberColumn].trim(),
-        name: row[nameColumn].trim(),
-        status: record ? record.status : 'Absent',
-        time: record ? record.time : '—',
-      };
+    const records = new Map();
+    const attendance = getAttendanceSheet_().getDataRange().getDisplayValues();
+    attendance.slice(1).forEach(function (row) {
+      if (row[0] === dateKey) records.set(row[1], { status: row[3], time: row[4] });
     });
+
+    return workers.slice(1)
+      .filter(function (row) {
+        return row[numberColumn].trim() && row[nameColumn].trim() &&
+          row[roleColumn].trim().toLowerCase() === 'worker';
+      })
+      .map(function (row) {
+        const record = records.get(row[numberColumn].trim());
+        return {
+          punchingNumber: row[numberColumn].trim(),
+          name: row[nameColumn].trim(),
+          plant: (row[plantColumn] || '').trim(),
+          contractor: (row[contractorColumn] || '').trim(),
+          status: record ? record.status : 'Absent',
+          time: record ? record.time : '—',
+        };
+      });
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function getSession_(token) {
@@ -898,13 +967,24 @@ function getHeaders_(sheet) {
   return headers;
 }
 
-function ensurePlantColumn_(sheet, headers) {
+function ensurePlantColumn_(sheet) {
+  const headers = getHeaders_(sheet);
   const plantColumn = columnIndex_(headers, 'Plant');
   if (plantColumn >= 0) return plantColumn;
 
-  const newPlantColumn = headers.length;
+  const newPlantColumn = sheet.getLastColumn();
   sheet.getRange(1, newPlantColumn + 1).setValue('Plant');
   return newPlantColumn;
+}
+
+function ensureContractorColumn_(sheet) {
+  const headers = getHeaders_(sheet);
+  const contractorColumn = columnIndex_(headers, 'Contractor');
+  if (contractorColumn >= 0) return contractorColumn;
+
+  const newContractorColumn = sheet.getLastColumn();
+  sheet.getRange(1, newContractorColumn + 1).setValue('Contractor');
+  return newContractorColumn;
 }
 
 function columnIndex_(headers, name) {

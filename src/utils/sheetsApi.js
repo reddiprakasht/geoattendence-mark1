@@ -108,6 +108,10 @@ export function getWorkerAccounts(sessionToken) {
   return requestSheetsApi({ action: 'getWorkers', sessionToken });
 }
 
+export function assignWorkerAccount(sessionToken, worker) {
+  return requestSheetsApi({ action: 'assignWorker', sessionToken, ...worker });
+}
+
 export function removeWorkerAccount(sessionToken, punchingNumber, adminPassword) {
   return requestSheetsApi({ action: 'removeWorker', sessionToken, punchingNumber, adminPassword });
 }

@@ -8,8 +8,8 @@ private; workers and administrators sign in with accounts listed in its `Workers
 1. Create a Google spreadsheet and, from **Extensions → Apps Script**, add the contents of
    [`apps-script/Code.gs`](./apps-script/Code.gs).
 2. In the spreadsheet, create a `Workers` tab with these exact headers in row 1:
-   `Punching Number`, `Name`, `Role`, `Password`, `Password Hash`, `Plant`. The app adds the
-   `Plant` column automatically for an existing deployment when an administrator opens Accounts.
+   `Punching Number`, `Name`, `Role`, `Password`, `Password Hash`, `Plant`, `Contractor`. The app
+   adds missing `Plant` and `Contractor` columns automatically when an administrator opens Accounts.
 3. Format the `Punching Number` column as plain text. Add the first administrator row manually:
    enter the admin punching number, name, set `Role` to `Admin`, enter a temporary password in
    `Password`, and leave `Password Hash` empty. The spreadsheet must remain shared only with trusted
@@ -43,11 +43,12 @@ future sign-ins, and invalidates that worker's active attendance session. Passwo
 Apps Script and are never saved in plaintext. Only accounts with the `Admin` role can manage workers
 or read shared attendance; only active accounts with the `Worker` role can submit a punch.
 Removing a worker requires the administrator's current password, verified by Apps Script.
-The Accounts plant dropdown filters workers and sets the plant for new accounts; choose Plant 1 or
-Plant 2 before creating a worker. Existing workers without a plant are shown as Unassigned; enter
-their plant in the `Plant` column of the private `Workers` sheet. Plant names can be changed in the
-`PLANTS` list in the application and Apps Script code, then deployed again. Plants are administrative
-labels only and share the same factory geofence.
+When creating a worker, administrators select a plant and contractor. The Accounts table can also
+update these assignments for existing workers. Older plant values or missing assignments appear as
+Unassigned until an administrator selects and saves the correct plant and contractor. Attendance
+History can be filtered by plant and contractor; filters use each worker's current assignments.
+Plant and contractor choices are shared with the Documents section and are defined in the application
+and Apps Script code. Plants are administrative labels only and share the same factory geofence.
 
 Administrators can upload bill copies and work orders from the **Documents** section. Files are
 stored in a private `GeoAttend Documents` folder in the Apps Script owner's Google Drive, grouped

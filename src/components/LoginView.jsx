@@ -6,14 +6,18 @@ export default function LoginView({ onLogin }) {
   const [punchingNumber, setPunchingNumber] = useState('');
   const [password, setPassword] = useState('');
   const [message, setMessage] = useState({ text: '', type: 'error' });
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   async function handleSubmit(event) {
     event.preventDefault();
+    if (isSubmitting) return;
     if (!punchingNumber.trim() || !password) {
       setMessage({ text: 'Enter your punching number and password.', type: 'error' });
       return;
     }
 
+    setIsSubmitting(true);
+    setMessage({ text: 'Checking your account…', type: 'info' });
     try {
       const user = await authenticateUser(punchingNumber.trim(), password);
       if (user.role !== loginRole) {
@@ -30,6 +34,8 @@ export default function LoginView({ onLogin }) {
         text: error instanceof Error ? error.message : 'Could not verify your account.',
         type: 'error',
       });
+    } finally {
+      setIsSubmitting(false);
     }
   }
 
@@ -81,6 +87,7 @@ export default function LoginView({ onLogin }) {
             type="button"
             className={loginRole === 'worker' ? 'active' : ''}
             aria-pressed={loginRole === 'worker'}
+            disabled={isSubmitting}
             onClick={() => {
               setLoginRole('worker');
               setMessage({ text: '', type: 'error' });
@@ -92,6 +99,7 @@ export default function LoginView({ onLogin }) {
             type="button"
             className={loginRole === 'admin' ? 'active' : ''}
             aria-pressed={loginRole === 'admin'}
+            disabled={isSubmitting}
             onClick={() => {
               setLoginRole('admin');
               setMessage({ text: '', type: 'error' });
@@ -100,7 +108,7 @@ export default function LoginView({ onLogin }) {
             Admin sign in
           </button>
         </div>
-        <form className="login-form" onSubmit={handleSubmit}>
+        <form className="login-form" onSubmit={handleSubmit} aria-busy={isSubmitting}>
           <label htmlFor="login-name">
             Punching number
           </label>
@@ -111,6 +119,7 @@ export default function LoginView({ onLogin }) {
             autoComplete="username"
             placeholder="Enter your punching number"
             value={punchingNumber}
+            disabled={isSubmitting}
             onChange={(event) => setPunchingNumber(event.target.value)}
           />
 
@@ -121,6 +130,7 @@ export default function LoginView({ onLogin }) {
             placeholder="Enter your password"
             autoComplete="current-password"
             value={password}
+            disabled={isSubmitting}
             onChange={(event) => setPassword(event.target.value)}
           />
 
@@ -132,9 +142,17 @@ export default function LoginView({ onLogin }) {
           <p className={`admin-msg message-${message.type}`} role="status" aria-live="polite">
             {message.text}
           </p>
-          <button type="submit">
-            {loginRole === 'admin' ? 'Sign in as administrator' : 'Sign in as worker'}
-            <span aria-hidden="true">→</span>
+          <button type="submit" disabled={isSubmitting}>
+            {isSubmitting
+              ? 'Signing in…'
+              : loginRole === 'admin'
+                ? 'Sign in as administrator'
+                : 'Sign in as worker'}
+            {isSubmitting ? (
+              <span className="login-spinner" aria-hidden="true" />
+            ) : (
+              <span aria-hidden="true">→</span>
+            )}
           </button>
         </form>
         <div className="login-privacy">
