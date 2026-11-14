@@ -748,6 +748,36 @@ button:disabled {
   padding: 10px 12px;
 }
 
+.attendance-register-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+}
+
+.attendance-register-controls label {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.attendance-register-controls select,
+.attendance-register-controls input {
+  width: auto;
+  min-width: 115px;
+  margin: 0;
+  padding: 9px;
+}
+
+.attendance-register-controls button {
+  width: auto;
+  margin: 0;
+  padding: 10px 14px;
+}
+
 .button-row {
   display: flex;
   max-width: 720px;
@@ -757,6 +787,26 @@ button:disabled {
 
 .button-row > button {
   flex: 1;
+}
+
+.attendance-action-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.attendance-action-row > button {
+  width: auto;
+  min-width: 0;
+  margin: 0;
+  padding: 12px 8px;
+}
+
+.attendance-current-status {
+  margin: 14px 0;
+  color: var(--primary-dark);
+  font-weight: 800;
+  text-align: center;
 }
 
 .worker-msg {
@@ -820,6 +870,55 @@ button:disabled {
   max-width: 100%;
   min-width: 0;
   overflow-x: auto;
+}
+
+.attendance-register-table {
+  width: max-content;
+  min-width: 100%;
+}
+
+.attendance-register-table th:nth-child(n + 5),
+.attendance-register-table .register-day-cell {
+  min-width: 42px;
+  padding-right: 7px;
+  padding-left: 7px;
+  text-align: center;
+}
+
+.register-day-cell {
+  cursor: help;
+  min-width: 90px;
+  white-space: nowrap;
+}
+
+.register-day-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.register-day-content > strong {
+  font-size: 0.9rem;
+}
+
+.register-day-times {
+  display: grid;
+  color: #485573;
+  font-size: 0.66rem;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: left;
+}
+
+.register-summary-cell {
+  min-width: 145px;
+  font-size: 0.8rem;
+}
+
+.register-summary-cell span {
+  display: block;
+  white-space: nowrap;
 }
 
 .worker-account-controls {

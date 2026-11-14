@@ -101,6 +101,12 @@ function handleRequest_(payload) {
     if (session.role !== 'worker') throw new Error('Only worker accounts can mark attendance.');
     return markAttendance_(session, payload);
   }
+  if (payload.action === 'workerAttendance') {
+    if (session.role !== 'worker') throw new Error('Only worker accounts can view their attendance.');
+    assertActiveWorker_(session);
+    const dateKey = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    return getWorkerAttendance_(session, dateKey);
+  }
   if (payload.action === 'addWorker') {
     if (session.role !== 'admin') throw new Error('Only administrators can add worker accounts.');
     return addWorker_(payload);
@@ -155,7 +161,7 @@ function handleRequest_(payload) {
   }
   if (payload.action === 'attendance') {
     if (session.role !== 'admin') throw new Error('Only administrators can view attendance.');
-    return getAttendanceRows_(payload.dateKey);
+    return getAttendanceRows_(payload.startDate, payload.endDate);
   }
 
   throw new Error('Unsupported request.');
@@ -716,6 +722,10 @@ function login_(payload) {
 
 function markAttendance_(session, payload) {
   assertActiveWorker_(session);
+  const eventType = payload.eventType;
+  if (['IN', 'P1', 'P2', 'OUT'].indexOf(eventType) < 0) {
+    throw new Error('Choose a valid attendance event.');
+  }
   const latitude = payload.latitude;
   const longitude = payload.longitude;
   if (typeof latitude !== 'number' || !Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
@@ -741,25 +751,48 @@ function markAttendance_(session, payload) {
     const existingIndex = rows.slice(1).findIndex(function (row) {
       return row[0] === dateKey && row[1] === session.punchingNumber;
     });
-    const values = [
-      dateKey,
-      session.punchingNumber,
-      session.name,
-      'Present',
-      time,
-      latitude,
-      longitude,
-    ];
-    if (existingIndex >= 0) {
-      sheet.getRange(existingIndex + 2, 1, 1, values.length).setValues([values]);
-    } else {
-      sheet.appendRow(values);
-    }
+    const existing = existingIndex >= 0 ? rows[existingIndex + 1] : [];
+    const inTime = existing[7] || (existing[3] === 'Present' ? existing[4] : '');
+    const p1Time = existing[8] || '';
+    const p2Time = existing[9] || '';
+    const outTime = existing[10] || '';
+
+    if (eventType === 'IN' && inTime) throw new Error('IN has already been recorded today.');
+    if (eventType !== 'IN' && !inTime) throw new Error('Record IN before this attendance event.');
+    if (eventType !== 'IN' && outTime) throw new Error('OUT has already been recorded today.');
+    if (eventType === 'P1' && p1Time) throw new Error('P1 has already been recorded today.');
+    if (eventType === 'P2' && p2Time) throw new Error('P2 has already been recorded today.');
+    if (eventType === 'OUT' && outTime) throw new Error('OUT has already been recorded today.');
+
+    const updatedInTime = eventType === 'IN' ? time : inTime;
+    const values = existing.slice(0, 11);
+    while (values.length < 11) values.push('');
+    values[0] = dateKey;
+    values[1] = session.punchingNumber;
+    values[2] = session.name;
+    values[3] = 'Present';
+    values[4] = updatedInTime;
+    values[5] = eventType === 'IN' ? latitude : (existing[5] || '');
+    values[6] = eventType === 'IN' ? longitude : (existing[6] || '');
+    values[7] = updatedInTime;
+    values[8] = eventType === 'P1' ? time : p1Time;
+    values[9] = eventType === 'P2' ? time : p2Time;
+    values[10] = eventType === 'OUT' ? time : outTime;
+
+    if (existingIndex >= 0) sheet.getRange(existingIndex + 2, 1, 1, values.length).setValues([values]);
+    else sheet.appendRow(values);
+
+    return {
+      dateKey: dateKey,
+      inTime: values[7],
+      p1Time: values[8],
+      p2Time: values[9],
+      outTime: values[10],
+      status: values[10] ? 'Present' : 'Currently Inside',
+    };
   } finally {
     lock.releaseLock();
   }
-
-  return { dateKey: dateKey, time: time };
 }
 
 function assertActiveWorker_(session) {
@@ -850,10 +883,8 @@ function verifyAdminPassword_(session, password) {
   cache.remove(attemptKey);
 }
 
-function getAttendanceRows_(dateKey) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ''))) {
-    throw new Error('Choose a valid attendance date.');
-  }
+function getAttendanceRows_(startDate, endDate) {
+  validateAttendanceRange_(startDate, endDate);
 
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
@@ -873,7 +904,18 @@ function getAttendanceRows_(dateKey) {
     const records = new Map();
     const attendance = getAttendanceSheet_().getDataRange().getDisplayValues();
     attendance.slice(1).forEach(function (row) {
-      if (row[0] === dateKey) records.set(row[1], { status: row[3], time: row[4] });
+      if (row[0] < startDate || row[0] > endDate) return;
+      const inTime = row[7] || (row[3] === 'Present' ? row[4] : '');
+      if (!inTime) return;
+      const days = records.get(row[1]) || {};
+      days[row[0]] = {
+        inTime: inTime,
+        p1Time: row[8] || '',
+        p2Time: row[9] || '',
+        outTime: row[10] || '',
+        status: row[10] ? 'Present' : 'Currently Inside',
+      };
+      records.set(row[1], days);
     });
 
     return workers.slice(1)
@@ -882,18 +924,49 @@ function getAttendanceRows_(dateKey) {
           row[roleColumn].trim().toLowerCase() === 'worker';
       })
       .map(function (row) {
-        const record = records.get(row[numberColumn].trim());
+        const days = records.get(row[numberColumn].trim()) || {};
         return {
           punchingNumber: row[numberColumn].trim(),
           name: row[nameColumn].trim(),
           plant: (row[plantColumn] || '').trim(),
           contractor: (row[contractorColumn] || '').trim(),
-          status: record ? record.status : 'Absent',
-          time: record ? record.time : '—',
+          status: Object.keys(days).length ? 'Present' : 'Absent',
+          time: days[startDate] ? days[startDate].inTime : '—',
+          days: days,
         };
       });
   } finally {
     lock.releaseLock();
+  }
+}
+
+function getWorkerAttendance_(session, dateKey) {
+  const rows = getAttendanceSheet_().getDataRange().getDisplayValues();
+  const row = rows.slice(1).find(function (attendanceRow) {
+    return attendanceRow[0] === dateKey && attendanceRow[1] === session.punchingNumber;
+  });
+  if (!row) return { dateKey: dateKey, inTime: '', p1Time: '', p2Time: '', outTime: '', status: 'Absent' };
+  const inTime = row[7] || (row[3] === 'Present' ? row[4] : '');
+  const outTime = row[10] || '';
+  return {
+    dateKey: dateKey,
+    inTime: inTime,
+    p1Time: row[8] || '',
+    p2Time: row[9] || '',
+    outTime: outTime,
+    status: inTime ? (outTime ? 'Present' : 'Currently Inside') : 'Absent',
+  };
+}
+
+function validateAttendanceRange_(startDate, endDate) {
+  function isValidDateKey_(dateKey) {
+    return typeof dateKey === 'string' &&
+      /^\d{4}-\d{2}-\d{2}$/.test(dateKey) &&
+      Utilities.formatDate(new Date(dateKey + 'T00:00:00Z'), 'UTC', 'yyyy-MM-dd') === dateKey;
+  }
+  if (!isValidDateKey_(startDate) || !isValidDateKey_(endDate) ||
+      startDate > endDate) {
+    throw new Error('Choose a valid attendance date range.');
   }
 }
 
@@ -944,14 +1017,25 @@ function getAttendanceSheet_() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = spreadsheet.getSheetByName(ATTENDANCE_SHEET);
   if (!sheet) sheet = spreadsheet.insertSheet(ATTENDANCE_SHEET);
-  const headers = ['Date', 'Punching Number', 'Name', 'Status', 'Time', 'Latitude', 'Longitude'];
+  const headers = [
+    'Date', 'Punching Number', 'Name', 'Status', 'Time', 'Latitude', 'Longitude',
+    'IN', 'P1', 'P2', 'OUT',
+  ];
   if (sheet.getLastRow() === 0) {
     sheet.appendRow(headers);
-  } else if (headers.some(function (header, index) {
+  } else if (headers.slice(0, 7).some(function (header, index) {
     return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) !==
       normalizeHeader_(header);
   })) {
     throw new Error('The Attendance tab headers do not match the required format.');
+  } else {
+    for (let index = 7; index < headers.length; index += 1) {
+      const existingHeader = sheet.getRange(1, index + 1).getDisplayValue();
+      if (existingHeader && normalizeHeader_(existingHeader) !== normalizeHeader_(headers[index])) {
+        throw new Error('The Attendance tab headers do not match the required format.');
+      }
+      if (!existingHeader) sheet.getRange(1, index + 1).setValue(headers[index]);
+    }
   }
   return sheet;
 }

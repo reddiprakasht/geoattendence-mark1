@@ -61,16 +61,26 @@ Supported files are JPG, PNG, WebP, and PDF, up to 8 MB each. To authorize priva
 After changing `Code.gs`, deploy a new version of the existing Apps Script web app. Documents are
 served only through admin-authenticated app requests; do not make the Drive folder public.
 
-The `Attendance` tab is created automatically and stores one record per worker per date;
-repeat punches update that day's time. Apps Script sessions last up to six hours. Because the
-deployment is public, use strong, unique passwords and keep the spreadsheet private. Apps Script
-checks submitted coordinates against the shared geofence; GPS coordinates themselves can still be
-spoofed on a device.
+The `Attendance` tab is created automatically and stores one record per worker per date. Worker
+attendance uses `IN`, optional `P1` and `P2` checks, then `OUT`; each event is timestamped by Apps
+Script and checks the shared geofence. `IN` is required first, each event can be recorded only once
+per day, and no event can be recorded after `OUT`. The app calculates completed shift hours from
+`IN` and `OUT` and shows an unfinished shift as Currently Inside.
+
+The original Attendance columns are retained. The app automatically appends `IN`, `P1`, `P2`, and
+`OUT` columns to an existing Attendance tab when the updated Apps Script first runs. Older rows
+with a `Present` status and a `Time` value are read as legacy `IN` punches, so existing attendance
+is preserved; new workers are included automatically from the Workers tab. Apps Script sessions
+last up to six hours. Because the deployment is public, use strong, unique passwords and keep the
+spreadsheet private. Apps Script checks submitted coordinates against the shared geofence; GPS
+coordinates themselves can still be spoofed on a device.
 
 Attendance recorded before this setup remains in the original browser's local storage and is not
 automatically imported into the sheet. The sheet retains records until an administrator removes
-them; the dashboard date picker shows the most recent three calendar months. The factory boundary
-is shared through Apps Script settings, so an administrator should save it once after deployment.
+them; the Attendance Register can display a selected month/year or a custom date range. Each
+worker row shows daily IN/OUT times and summarizes present days, absent days, and completed working
+hours; hovering over a daily cell shows the full punch breakdown. The factory boundary is shared
+through Apps Script settings, so an administrator should save it once after deployment.
 Existing local-only boundaries are shown on that device until the administrator saves one to share;
 existing circular boundaries can be shared without drawing a polygon.
 

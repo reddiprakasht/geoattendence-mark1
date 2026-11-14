@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { getAttendanceRows } from '../utils/attendance.js';
+import { getAttendanceRange } from '../utils/attendance.js';
 import { hasConfiguredGeofence, isValidGeofencePolygon } from '../utils/geofence.js';
 import { parseGoogleMapsLocation } from '../utils/googleMaps.js';
 import {
@@ -18,7 +18,6 @@ import {
 } from '../utils/sheetsApi.js';
 import GeofenceMap from './GeofenceMap.jsx';
 import {
-  getAttendanceRetentionStartDate,
   getGeofence,
   getLocalDateKey,
   isAdmin,
@@ -48,6 +47,34 @@ const DOCUMENT_CONTRACTORS = [
   { value: 'mahadeva-experts', label: 'MAHADEVA EXPERTS' },
 ];
 
+function getAttendanceDates(startDate, endDate) {
+  const dates = [];
+  if (!startDate || !endDate || startDate > endDate) return dates;
+  const current = new Date(`${startDate}T12:00:00`);
+  const last = new Date(`${endDate}T12:00:00`);
+  while (current <= last) {
+    dates.push(getLocalDateKey(current));
+    current.setDate(current.getDate() + 1);
+  }
+  return dates;
+}
+
+function getShiftMinutes(inTime, outTime) {
+  if (!inTime || !outTime) return 0;
+  const toMinutes = (time) => {
+    const [hours, minutes, seconds] = time.split(':').map(Number);
+    return hours * 60 + minutes + seconds / 60;
+  };
+  const minutes = Math.floor(toMinutes(outTime) - toMinutes(inTime));
+  return minutes > 0 ? minutes : 0;
+}
+
+function formatShiftHours(minutes) {
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours} hr${hours === 1 ? '' : 's'} ${remainingMinutes} min${remainingMinutes === 1 ? '' : 's'}`;
+}
+
 export default function AdminDashboard({ user, onLogout }) {
   const [activeSection, setActiveSection] = useState('attendance');
   const [geofence, setGeofenceForm] = useState(getGeofence());
@@ -61,7 +88,17 @@ export default function AdminDashboard({ user, onLogout }) {
     type: hasConfiguredGeofence(geofence) ? 'success' : 'info',
   });
   const [googleMapsInput, setGoogleMapsInput] = useState('');
-  const [attendanceDate, setAttendanceDate] = useState(() => getLocalDateKey());
+  const todayDate = getLocalDateKey();
+  const currentYear = Number(todayDate.slice(0, 4));
+  const [attendancePeriodMode, setAttendancePeriodMode] = useState('month');
+  const [attendanceMonth, setAttendanceMonth] = useState(todayDate.slice(5, 7));
+  const [attendanceYear, setAttendanceYear] = useState(todayDate.slice(0, 4));
+  const [attendanceFromDate, setAttendanceFromDate] = useState(`${todayDate.slice(0, 7)}-01`);
+  const [attendanceToDate, setAttendanceToDate] = useState(todayDate);
+  const [attendanceRange, setAttendanceRange] = useState({
+    startDate: `${todayDate.slice(0, 7)}-01`,
+    endDate: todayDate,
+  });
   const [attendanceRows, setAttendanceRows] = useState([]);
   const [attendancePlantFilter, setAttendancePlantFilter] = useState('all');
   const [attendanceContractorFilter, setAttendanceContractorFilter] = useState('all');
@@ -70,6 +107,7 @@ export default function AdminDashboard({ user, onLogout }) {
     type: 'info',
   });
   const [attendanceLoading, setAttendanceLoading] = useState(false);
+  const attendanceDates = getAttendanceDates(attendanceRange.startDate, attendanceRange.endDate);
   const [workerAccount, setWorkerAccount] = useState({
     name: '',
     punchingNumber: '',
@@ -120,10 +158,13 @@ export default function AdminDashboard({ user, onLogout }) {
   const [documentFile, setDocumentFile] = useState(null);
 
   useEffect(() => {
-    loadAttendance(getLocalDateKey());
     loadSharedBoundary();
     loadWorkerAccounts();
   }, []);
+
+  useEffect(() => {
+    loadAttendance(attendanceRange.startDate, attendanceRange.endDate);
+  }, [attendanceRange.startDate, attendanceRange.endDate, user.sessionToken]);
 
   useEffect(() => {
     if (!removalTarget || removingWorker) return undefined;
@@ -367,24 +408,31 @@ export default function AdminDashboard({ user, onLogout }) {
     );
   }
 
-  async function loadAttendance(dateKey) {
+  async function loadAttendance(startDate, endDate) {
     if (!ensureAdmin()) return;
+    if (!startDate || !endDate || startDate > endDate) {
+      setAttendanceMessage({
+        text: 'Choose a valid date range.',
+        type: 'error',
+      });
+      return;
+    }
     setAttendanceLoading(true);
     setAttendanceRows([]);
     setAttendanceMessage({ text: '', type: 'info' });
     try {
-      const rows = await getAttendanceRows(dateKey, user.sessionToken);
+      const rows = await getAttendanceRange(startDate, endDate, user.sessionToken);
       if (!Array.isArray(rows) || rows.some((row) =>
         !row ||
         typeof row.punchingNumber !== 'string' ||
         typeof row.name !== 'string' ||
         typeof row.plant !== 'string' ||
         typeof row.contractor !== 'string' ||
-        typeof row.status !== 'string' ||
-        typeof row.time !== 'string'
+        !row.days ||
+        typeof row.days !== 'object'
       )) {
         throw new Error(
-          'Plant and contractor attendance filters are not enabled in Apps Script. Update Code.gs and deploy a new version.',
+          'The attendance register API is not enabled. Update Code.gs and deploy a new version.',
         );
       }
       setAttendanceRows(rows);
@@ -399,21 +447,34 @@ export default function AdminDashboard({ user, onLogout }) {
   }
 
   function refreshAttendance() {
-    loadAttendance(attendanceDate);
+    loadAttendance(attendanceRange.startDate, attendanceRange.endDate);
   }
 
-  function changeAttendanceDate(dateKey) {
-    const minDate = getAttendanceRetentionStartDate();
-    const maxDate = getLocalDateKey();
-    if (dateKey < minDate || dateKey > maxDate) return;
-    setAttendanceDate(dateKey);
-    loadAttendance(dateKey);
-  }
+  function applyAttendancePeriod(event) {
+    event.preventDefault();
+    if (attendancePeriodMode === 'custom') {
+      if (!attendanceFromDate || !attendanceToDate ||
+          attendanceFromDate > attendanceToDate || attendanceToDate > getLocalDateKey()) {
+        setAttendanceMessage({
+          text: 'Choose a valid custom date range ending today or earlier.',
+          type: 'error',
+        });
+        return;
+      }
+      setAttendanceRange({ startDate: attendanceFromDate, endDate: attendanceToDate });
+      return;
+    }
 
-  function navigateAttendanceDate(days) {
-    const date = new Date(`${attendanceDate}T12:00:00`);
-    date.setDate(date.getDate() + days);
-    changeAttendanceDate(getLocalDateKey(date));
+    const year = Number(attendanceYear);
+    const month = Number(attendanceMonth);
+    const lastDay = new Date(year, month, 0).getDate();
+    const startDate = `${attendanceYear}-${attendanceMonth}-01`;
+    const endDate = `${attendanceYear}-${attendanceMonth}-${String(lastDay).padStart(2, '0')}`;
+    if (startDate > getLocalDateKey()) {
+      setAttendanceMessage({ text: 'Future dates are not available.', type: 'error' });
+      return;
+    }
+    setAttendanceRange({ startDate, endDate });
   }
 
   function updateWorkerAccount(field, value) {
@@ -898,9 +959,6 @@ export default function AdminDashboard({ user, onLogout }) {
     return false;
   }
 
-  const attendanceStatusByPunchingNumber = new Map(
-    attendanceRows.map((row) => [row.punchingNumber, row.status]),
-  );
   const attendanceUnavailable = attendanceLoading || attendanceMessage.type === 'error';
   const filteredAttendanceRows = attendanceRows.filter((row) => {
     const matchesPlant =
@@ -919,9 +977,8 @@ export default function AdminDashboard({ user, onLogout }) {
   function getWorkerAttendanceStatus(punchingNumber) {
     if (attendanceLoading) return 'Loading...';
     if (attendanceMessage.type === 'error') return 'Unavailable';
-    return attendanceStatusByPunchingNumber.get(punchingNumber) === 'Present'
-      ? 'Present'
-      : 'Absent';
+    const row = attendanceRows.find((attendanceRow) => attendanceRow.punchingNumber === punchingNumber);
+    return row && Object.keys(row.days).length ? 'Present' : 'Absent';
   }
 
   const filteredWorkerAccounts = workerAccounts.filter((account) => {
@@ -1034,8 +1091,8 @@ export default function AdminDashboard({ user, onLogout }) {
           <strong>{hasConfiguredGeofence(geofence) ? 'Configured' : 'Needs setup'}</strong>
         </div>
         <div className="stat-card">
-          <span className="stat-label">Present on selected date</span>
-          <strong>{attendanceRows.filter((row) => row.status === 'Present').length} workers</strong>
+          <span className="stat-label">Present in selected period</span>
+          <strong>{attendanceRows.filter((row) => Object.keys(row.days).length > 0).length} workers</strong>
         </div>
         <div className="stat-card">
           <span className="stat-label">Security</span>
@@ -1134,48 +1191,83 @@ export default function AdminDashboard({ user, onLogout }) {
 
         {activeSection === 'attendance' && <section className="panel-card">
           <div className="panel-heading">
-            <h2>Attendance History</h2>
-            <span className="panel-tag">Past 3 months</span>
+            <h2>Attendance Register</h2>
+            <span className="panel-tag">Muster Roll</span>
           </div>
-          <div className="date-row">
-            <div className="attendance-date-controls">
-              <button
-                className="secondary-btn date-nav-btn"
-                type="button"
-                onClick={() => navigateAttendanceDate(-1)}
-                disabled={attendanceDate <= getAttendanceRetentionStartDate()}
-                aria-label="Previous day"
-              >
-                Previous
-              </button>
-              <input
-                id="attendance-date"
-                aria-label="Attendance date"
-                type="date"
-                min={getAttendanceRetentionStartDate()}
-                max={getLocalDateKey()}
-                value={attendanceDate}
-                onChange={(event) => changeAttendanceDate(event.target.value)}
-              />
-              <button
-                className="secondary-btn date-nav-btn"
-                type="button"
-                onClick={() => navigateAttendanceDate(1)}
-                disabled={attendanceDate >= getLocalDateKey()}
-                aria-label="Next day"
-              >
-                Next
-              </button>
-            </div>
+          <form className="attendance-register-controls" onSubmit={applyAttendancePeriod}>
+            <label htmlFor="attendance-period-mode">Register period:</label>
+            <select
+              id="attendance-period-mode"
+              value={attendancePeriodMode}
+              onChange={(event) => setAttendancePeriodMode(event.target.value)}
+            >
+              <option value="month">Month</option>
+              <option value="custom">Custom date range</option>
+            </select>
+            {attendancePeriodMode === 'month' ? (
+              <>
+                <label htmlFor="attendance-month">Month:</label>
+                <select
+                  id="attendance-month"
+                  value={attendanceMonth}
+                  onChange={(event) => setAttendanceMonth(event.target.value)}
+                >
+                  {Array.from({ length: 12 }, (_, index) => {
+                    const value = String(index + 1).padStart(2, '0');
+                    const label = new Date(2000, index, 1).toLocaleString(undefined, { month: 'long' });
+                    return <option key={value} value={value}>{label}</option>;
+                  })}
+                </select>
+                <label htmlFor="attendance-year">Year:</label>
+                <select
+                  id="attendance-year"
+                  value={attendanceYear}
+                  onChange={(event) => setAttendanceYear(event.target.value)}
+                >
+                  {Array.from({ length: currentYear - 1999 }, (_, index) => currentYear - index)
+                    .map((year) => (
+                      <option key={year} value={year}>{year}</option>
+                    ))}
+                </select>
+              </>
+            ) : (
+              <>
+                <label htmlFor="attendance-from-date">From:</label>
+                <input
+                  id="attendance-from-date"
+                  type="date"
+                  max={getLocalDateKey()}
+                  value={attendanceFromDate}
+                  onChange={(event) => setAttendanceFromDate(event.target.value)}
+                  required
+                />
+                <label htmlFor="attendance-to-date">To:</label>
+                <input
+                  id="attendance-to-date"
+                  type="date"
+                  max={getLocalDateKey()}
+                  value={attendanceToDate}
+                  onChange={(event) => setAttendanceToDate(event.target.value)}
+                  required
+                />
+              </>
+            )}
+            <button
+              className="secondary-btn refresh-btn"
+              type="submit"
+              disabled={attendanceLoading}
+            >
+              Apply Period
+            </button>
             <button
               className="secondary-btn refresh-btn"
               type="button"
               onClick={refreshAttendance}
               disabled={attendanceLoading}
             >
-              Refresh List
+              Refresh
             </button>
-          </div>
+          </form>
           <div className="document-filters attendance-filters">
             <div>
               <label htmlFor="attendance-plant-filter">Filter by plant:</label>
@@ -1210,31 +1302,90 @@ export default function AdminDashboard({ user, onLogout }) {
             {attendanceLoading ? 'Loading attendance...' : attendanceMessage.text}
           </p>
           <div className="table-scroll">
-            <table>
+            <table className="attendance-register-table">
               <thead>
                 <tr>
                   <th>Name</th>
+                  <th>Punching No.</th>
                   <th>Plant</th>
                   <th>Contractor</th>
-                  <th>Status</th>
-                  <th>Time</th>
+                  {attendanceDates.map((date) => (
+                    <th key={date} title={date}>
+                      {new Date(`${date}T12:00:00`).getDate()}
+                    </th>
+                  ))}
+                  <th>Period Summary</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredAttendanceRows.map((row) => (
                   <tr key={row.punchingNumber}>
                     <td>{row.name}</td>
+                    <td>{row.punchingNumber}</td>
                     <td>{attendancePlantLabel(row.plant)}</td>
                     <td>{attendanceContractorLabel(row.contractor)}</td>
-                    <td className={row.status === 'Present' ? 'status-present' : 'status-absent'}>
-                      {row.status}
-                    </td>
-                    <td>{row.time}</td>
+                    {attendanceDates.map((date) => {
+                      const day = row.days[date] || {};
+                      const isFutureDate = date > getLocalDateKey();
+                      const isPresent = Boolean(day?.inTime);
+                      const isToday = date === getLocalDateKey();
+                      const details = [
+                        `IN: ${day.inTime || 'Not Marked'}`,
+                        `P1: ${day.p1Time || 'Not Marked'}`,
+                        `P2: ${day.p2Time || 'Not Marked'}`,
+                        `OUT: ${day.outTime || 'Not Marked'}`,
+                        `Total Hours: ${day.inTime && day.outTime
+                          ? formatShiftHours(getShiftMinutes(day.inTime, day.outTime))
+                          : day.inTime && date === getLocalDateKey()
+                            ? 'Currently Inside'
+                            : day.inTime ? 'Not Available' : '—'}`,
+                      ].join('\n');
+                      return (
+                        <td
+                          key={date}
+                          className={`register-day-cell ${isFutureDate ? '' : isPresent ? 'status-present' : 'status-absent'}`}
+                          title={isFutureDate ? 'Future date' : details}
+                          aria-label={`${date}: ${isFutureDate ? 'Not applicable' : isPresent ? 'Present. ' + details : 'Absent'}`}
+                        >
+                          {isFutureDate ? '—' : isPresent ? (
+                            <span className="register-day-content">
+                              <strong>P</strong>
+                              <span className="register-day-times">
+                                <span>IN {day.inTime.slice(0, 5)}</span>
+                                <span>
+                                  OUT {day.outTime
+                                    ? day.outTime.slice(0, 5)
+                                    : isToday ? 'Inside' : '—'}
+                                </span>
+                              </span>
+                            </span>
+                          ) : 'A'}
+                        </td>
+                      );
+                    })}
+                    {(() => {
+                      const eligibleDates = attendanceDates.filter((date) => date <= getLocalDateKey());
+                      const totalPresent = eligibleDates.filter((date) => Boolean(row.days[date]?.inTime)).length;
+                      const totalAbsent = eligibleDates.length - totalPresent;
+                      const totalMinutes = eligibleDates.reduce(
+                        (total, date) => total + getShiftMinutes(row.days[date]?.inTime, row.days[date]?.outTime),
+                        0,
+                      );
+                      return (
+                        <td className="register-summary-cell">
+                          <span>Days Present: {totalPresent}</span>
+                          <span>Days Absent: {totalAbsent}</span>
+                          <span>Total Hours: {formatShiftHours(totalMinutes)}</span>
+                        </td>
+                      );
+                    })()}
                   </tr>
                 ))}
                 {!attendanceLoading && filteredAttendanceRows.length === 0 && (
                   <tr>
-                    <td colSpan="5">No workers match these plant and contractor filters.</td>
+                    <td colSpan={5 + attendanceDates.length}>
+                      No workers match these plant and contractor filters.
+                    </td>
                   </tr>
                 )}
               </tbody>
@@ -1295,7 +1446,7 @@ export default function AdminDashboard({ user, onLogout }) {
             </div>
             <p className="map-hint">
               Use the assignment selectors to categorize existing workers. Attendance status is
-              based on the selected date in Attendance History.
+              based on the selected period in the Attendance Register.
               {attendanceLoading ? ' Loading attendance...' : ''}
               {!attendanceLoading && attendanceMessage.type === 'error'
                 ? ' Attendance status could not be loaded.'
