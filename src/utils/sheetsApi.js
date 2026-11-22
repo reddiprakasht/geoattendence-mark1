@@ -71,9 +71,21 @@ export function requestSheetsApi(payload, timeoutMs = 30000) {
         const unsupportedDocumentsAction =
           message.response.error === 'Unsupported request.' &&
           ['listDocuments', 'uploadDocument', 'getDocument', 'deleteDocument', 'assignDocument'].includes(payload.action);
+        const unsupportedWorkOrderAction =
+          message.response.error === 'Unsupported request.' &&
+          [
+            'listWorkOrders',
+            'saveWorkOrder',
+            'saveMonthlyBill',
+            'setWorkOrderStatus',
+            'deleteWorkOrder',
+            'deleteMonthlyBill',
+          ].includes(payload.action);
         reject(new Error(
           unsupportedDocumentsAction
             ? 'Document storage is not enabled in the deployed Apps Script. Save the updated Code.gs, run prepareDocumentsFolder once to authorize Drive, then deploy a new version of the existing web app.'
+            : unsupportedWorkOrderAction
+              ? 'Work Order support is not enabled in the deployed Apps Script. Save the updated apps-script/Code.gs, then deploy a new version of the existing web app.'
             : message.response.error || 'Google Sheets request failed.',
         ));
       }
