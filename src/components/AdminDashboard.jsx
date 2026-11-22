@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { getAttendanceRange } from '../utils/attendance.js';
+import {
+  formatShiftHours,
+  getAttendanceBillingPeriod,
+  getAttendanceDates,
+  getAttendancePeriodForMonth,
+  getAttendanceRange,
+  getAttendanceSummary,
+  getShiftMinutes,
+} from '../utils/attendance.js';
 import { hasConfiguredGeofence, isValidGeofencePolygon } from '../utils/geofence.js';
 import { parseGoogleMapsLocation } from '../utils/googleMaps.js';
 import {
@@ -23,6 +31,7 @@ import {
   isAdmin,
   saveGeofence,
 } from '../utils/storage.js';
+import WorkOrderTracker from './WorkOrderTracker.jsx';
 
 const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
 const DOCUMENT_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
@@ -47,34 +56,6 @@ const DOCUMENT_CONTRACTORS = [
   { value: 'mahadeva-experts', label: 'MAHADEVA EXPERTS' },
 ];
 
-function getAttendanceDates(startDate, endDate) {
-  const dates = [];
-  if (!startDate || !endDate || startDate > endDate) return dates;
-  const current = new Date(`${startDate}T12:00:00`);
-  const last = new Date(`${endDate}T12:00:00`);
-  while (current <= last) {
-    dates.push(getLocalDateKey(current));
-    current.setDate(current.getDate() + 1);
-  }
-  return dates;
-}
-
-function getShiftMinutes(inTime, outTime) {
-  if (!inTime || !outTime) return 0;
-  const toMinutes = (time) => {
-    const [hours, minutes, seconds] = time.split(':').map(Number);
-    return hours * 60 + minutes + seconds / 60;
-  };
-  const minutes = Math.floor(toMinutes(outTime) - toMinutes(inTime));
-  return minutes > 0 ? minutes : 0;
-}
-
-function formatShiftHours(minutes) {
-  const hours = Math.floor(minutes / 60);
-  const remainingMinutes = minutes % 60;
-  return `${hours} hr${hours === 1 ? '' : 's'} ${remainingMinutes} min${remainingMinutes === 1 ? '' : 's'}`;
-}
-
 export default function AdminDashboard({ user, onLogout }) {
   const [activeSection, setActiveSection] = useState('attendance');
   const [geofence, setGeofenceForm] = useState(getGeofence());
@@ -90,15 +71,13 @@ export default function AdminDashboard({ user, onLogout }) {
   const [googleMapsInput, setGoogleMapsInput] = useState('');
   const todayDate = getLocalDateKey();
   const currentYear = Number(todayDate.slice(0, 4));
+  const initialAttendancePeriod = getAttendanceBillingPeriod(todayDate);
   const [attendancePeriodMode, setAttendancePeriodMode] = useState('month');
-  const [attendanceMonth, setAttendanceMonth] = useState(todayDate.slice(5, 7));
-  const [attendanceYear, setAttendanceYear] = useState(todayDate.slice(0, 4));
-  const [attendanceFromDate, setAttendanceFromDate] = useState(`${todayDate.slice(0, 7)}-01`);
+  const [attendanceMonth, setAttendanceMonth] = useState(initialAttendancePeriod.startDate.slice(5, 7));
+  const [attendanceYear, setAttendanceYear] = useState(initialAttendancePeriod.startDate.slice(0, 4));
+  const [attendanceFromDate, setAttendanceFromDate] = useState(initialAttendancePeriod.startDate);
   const [attendanceToDate, setAttendanceToDate] = useState(todayDate);
-  const [attendanceRange, setAttendanceRange] = useState({
-    startDate: `${todayDate.slice(0, 7)}-01`,
-    endDate: todayDate,
-  });
+  const [attendanceRange, setAttendanceRange] = useState(initialAttendancePeriod);
   const [attendanceRows, setAttendanceRows] = useState([]);
   const [attendancePlantFilter, setAttendancePlantFilter] = useState('all');
   const [attendanceContractorFilter, setAttendanceContractorFilter] = useState('all');
@@ -465,11 +444,10 @@ export default function AdminDashboard({ user, onLogout }) {
       return;
     }
 
-    const year = Number(attendanceYear);
-    const month = Number(attendanceMonth);
-    const lastDay = new Date(year, month, 0).getDate();
-    const startDate = `${attendanceYear}-${attendanceMonth}-01`;
-    const endDate = `${attendanceYear}-${attendanceMonth}-${String(lastDay).padStart(2, '0')}`;
+    const { startDate, endDate } = getAttendancePeriodForMonth(
+      Number(attendanceYear),
+      Number(attendanceMonth),
+    );
     if (startDate > getLocalDateKey()) {
       setAttendanceMessage({ text: 'Future dates are not available.', type: 'error' });
       return;
@@ -1083,6 +1061,16 @@ export default function AdminDashboard({ user, onLogout }) {
         >
           Documents
         </button>
+        <button
+          id="work-orders-tab"
+          type="button"
+          className={`nav-pill ${activeSection === 'work-orders' ? 'active' : ''}`}
+          aria-pressed={activeSection === 'work-orders'}
+          aria-controls="admin-content-panel"
+          onClick={() => setActiveSection('work-orders')}
+        >
+          Work Orders
+        </button>
       </nav>
 
       <div className="stats-grid">
@@ -1314,7 +1302,7 @@ export default function AdminDashboard({ user, onLogout }) {
                       {new Date(`${date}T12:00:00`).getDate()}
                     </th>
                   ))}
-                  <th>Period Summary</th>
+                  <th>PERIOD SUMMARY</th>
                 </tr>
               </thead>
               <tbody>
@@ -1364,18 +1352,12 @@ export default function AdminDashboard({ user, onLogout }) {
                       );
                     })}
                     {(() => {
-                      const eligibleDates = attendanceDates.filter((date) => date <= getLocalDateKey());
-                      const totalPresent = eligibleDates.filter((date) => Boolean(row.days[date]?.inTime)).length;
-                      const totalAbsent = eligibleDates.length - totalPresent;
-                      const totalMinutes = eligibleDates.reduce(
-                        (total, date) => total + getShiftMinutes(row.days[date]?.inTime, row.days[date]?.outTime),
-                        0,
-                      );
+                      const summary = getAttendanceSummary(row.days, attendanceDates);
                       return (
                         <td className="register-summary-cell">
-                          <span>Days Present: {totalPresent}</span>
-                          <span>Days Absent: {totalAbsent}</span>
-                          <span>Total Hours: {formatShiftHours(totalMinutes)}</span>
+                          <span>Days Present: {summary.daysPresent}</span>
+                          <span>Days Absent: {summary.daysAbsent}</span>
+                          <span>Total Hours: {formatShiftHours(summary.totalMinutes)}</span>
                         </td>
                       );
                     })()}
@@ -1868,6 +1850,8 @@ export default function AdminDashboard({ user, onLogout }) {
             )
           )}
         </section>}
+
+        {activeSection === 'work-orders' && <WorkOrderTracker user={user} />}
       </section>
       {removalTarget && createPortal(
         <div

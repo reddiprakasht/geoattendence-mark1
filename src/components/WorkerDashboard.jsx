@@ -1,10 +1,17 @@
 import { useEffect, useState } from 'react';
 import {
+  formatShiftHours,
+  getAttendanceBillingPeriod,
+  getAttendanceDates,
+  getAttendanceSummary,
+  getShiftMinutes,
   getWorkerAttendance,
+  getWorkerAttendanceRange,
   markWorkerAttendance,
 } from '../utils/attendance.js';
 import { hasConfiguredGeofence, isPointInGeofence } from '../utils/geofence.js';
 import { getSharedGeofence } from '../utils/sheetsApi.js';
+import { getLocalDateKey } from '../utils/storage.js';
 
 const EMPTY_RECORD = {
   inTime: '',
@@ -14,19 +21,6 @@ const EMPTY_RECORD = {
   status: 'Absent',
 };
 
-function formatTotalHours(inTime, outTime) {
-  if (!inTime || !outTime) return '';
-  const toSeconds = (time) => {
-    const [hours, minutes, seconds] = time.split(':').map(Number);
-    return hours * 3600 + minutes * 60 + seconds;
-  };
-  const totalMinutes = Math.floor((toSeconds(outTime) - toSeconds(inTime)) / 60);
-  if (totalMinutes < 0) return '';
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return `${hours} hr${hours === 1 ? '' : 's'} ${minutes} min${minutes === 1 ? '' : 's'}`;
-}
-
 export default function WorkerDashboard({ user, onLogout }) {
   const [geofence, setGeofence] = useState(null);
   const [boundaryLoading, setBoundaryLoading] = useState(true);
@@ -34,6 +28,12 @@ export default function WorkerDashboard({ user, onLogout }) {
   const [recordReady, setRecordReady] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [record, setRecord] = useState(EMPTY_RECORD);
+  const [periodAttendance, setPeriodAttendance] = useState(null);
+  const [periodAttendanceLoading, setPeriodAttendanceLoading] = useState(true);
+  const [periodAttendanceMessage, setPeriodAttendanceMessage] = useState('');
+  const billingPeriod = getAttendanceBillingPeriod();
+  const attendanceDates = getAttendanceDates(billingPeriod.startDate, billingPeriod.endDate);
+  const todayDate = getLocalDateKey();
   const [message, setMessage] = useState({
     text: "Loading the shared factory boundary and today's attendance...",
     type: 'info',
@@ -85,10 +85,36 @@ export default function WorkerDashboard({ user, onLogout }) {
         if (active) setRecordLoading(false);
       });
 
+    setPeriodAttendanceLoading(true);
+    setPeriodAttendanceMessage('');
+    getWorkerAttendanceRange(
+      billingPeriod.startDate,
+      billingPeriod.endDate,
+      user.sessionToken,
+    )
+      .then((attendance) => {
+        if (!attendance || typeof attendance !== 'object' ||
+            typeof attendance.punchingNumber !== 'string' ||
+            typeof attendance.name !== 'string' ||
+            !attendance.days || typeof attendance.days !== 'object') {
+          throw new Error('The personal attendance register response is invalid.');
+        }
+        if (active) setPeriodAttendance(attendance);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setPeriodAttendanceMessage(
+          error instanceof Error ? error.message : 'Could not load your attendance period.',
+        );
+      })
+      .finally(() => {
+        if (active) setPeriodAttendanceLoading(false);
+      });
+
     return () => {
       active = false;
     };
-  }, [user.sessionToken]);
+  }, [user.sessionToken, billingPeriod.startDate, billingPeriod.endDate]);
 
   function markEvent(eventType) {
     if (!user.sessionToken || user.role !== 'worker') {
@@ -129,6 +155,12 @@ export default function WorkerDashboard({ user, onLogout }) {
             longitude,
           );
           setRecord(updatedRecord);
+          setPeriodAttendance((current) => current && updatedRecord.dateKey
+            ? {
+              ...current,
+              days: { ...current.days, [updatedRecord.dateKey]: updatedRecord },
+            }
+            : current);
           setMessage({ text: `${eventType} recorded successfully.`, type: 'success' });
         } catch (error) {
           setMessage({
@@ -157,7 +189,7 @@ export default function WorkerDashboard({ user, onLogout }) {
     user.role !== 'worker' ||
     !user.sessionToken ||
     !hasConfiguredGeofence(geofence);
-  const totalHours = formatTotalHours(record.inTime, record.outTime);
+  const totalHours = formatShiftHours(getShiftMinutes(record.inTime, record.outTime));
   const actions = [
     { type: 'IN', disabled: allPillsDisabled || hasIn },
     { type: 'P1', disabled: allPillsDisabled || !hasIn || Boolean(record.p1Time) },
@@ -166,13 +198,18 @@ export default function WorkerDashboard({ user, onLogout }) {
   ];
 
   return (
-    <section>
-      <button className="back-btn" type="button" onClick={onLogout}>
-        Back to Login / Logout
-      </button>
-      <h1>Worker Dashboard</h1>
-      <p>Welcome, {user.name}!</p>
-      <p className="muted">
+    <section className="worker-page">
+      <header className="worker-header">
+        <div>
+          <p className="eyebrow">Worker portal</p>
+          <h1>Worker Dashboard</h1>
+          <p>Welcome, {user.name}!</p>
+        </div>
+        <button className="back-btn" type="button" onClick={onLogout}>
+          Logout
+        </button>
+      </header>
+      <p className="muted worker-helper">
         Record each attendance event while inside the factory boundary.
       </p>
       <div className="button-row attendance-action-row" aria-label="Attendance actions">
@@ -188,6 +225,97 @@ export default function WorkerDashboard({ user, onLogout }) {
           </button>
         ))}
       </div>
+      <section className="worker-attendance" aria-label="Your attendance register">
+        <div className="panel-heading">
+          <h2>Attendance Register</h2>
+          <span className="panel-tag">
+            {billingPeriod.startDate} – {billingPeriod.endDate}
+          </span>
+        </div>
+        <p className="admin-msg" role="status" aria-live="polite">
+          {periodAttendanceLoading
+            ? 'Loading attendance...'
+            : periodAttendanceMessage}
+        </p>
+        <div className="table-scroll">
+          <table className="attendance-register-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Punching No.</th>
+                {attendanceDates.map((date) => (
+                  <th key={date} title={date}>
+                    {new Date(`${date}T12:00:00`).getDate()}
+                  </th>
+                ))}
+                <th>PERIOD SUMMARY</th>
+              </tr>
+            </thead>
+            <tbody>
+              {periodAttendance && (
+                <tr>
+                  <td>{periodAttendance.name}</td>
+                  <td>{periodAttendance.punchingNumber}</td>
+                  {attendanceDates.map((date) => {
+                    const day = periodAttendance.days[date] || {};
+                    const isFutureDate = date > todayDate;
+                    const isPresent = Boolean(day.inTime);
+                    const isToday = date === todayDate;
+                    const details = [
+                      `IN: ${day.inTime || 'Not Marked'}`,
+                      `P1: ${day.p1Time || 'Not Marked'}`,
+                      `P2: ${day.p2Time || 'Not Marked'}`,
+                      `OUT: ${day.outTime || 'Not Marked'}`,
+                      `Total Hours: ${day.inTime && day.outTime
+                        ? formatShiftHours(getShiftMinutes(day.inTime, day.outTime))
+                        : day.inTime && isToday ? 'Currently Inside' : day.inTime ? 'Not Available' : '—'}`,
+                    ].join('\n');
+                    return (
+                      <td
+                        key={date}
+                        className={`register-day-cell ${isFutureDate ? '' : isPresent ? 'status-present' : 'status-absent'}`}
+                        title={isFutureDate ? 'Future date' : details}
+                        aria-label={`${date}: ${isFutureDate ? 'Not applicable' : isPresent ? 'Present. ' + details : 'Absent'}`}
+                      >
+                        {isFutureDate ? '—' : isPresent ? (
+                          <span className="register-day-content">
+                            <strong>P</strong>
+                            <span className="register-day-times">
+                              <span>IN {day.inTime.slice(0, 5)}</span>
+                              <span>
+                                OUT {day.outTime
+                                  ? day.outTime.slice(0, 5)
+                                  : isToday ? 'Inside' : '—'}
+                              </span>
+                            </span>
+                          </span>
+                        ) : 'A'}
+                      </td>
+                    );
+                  })}
+                  {(() => {
+                    const summary = getAttendanceSummary(periodAttendance.days, attendanceDates);
+                    return (
+                      <td className="register-summary-cell">
+                        <span>Days Present: {summary.daysPresent}</span>
+                        <span>Days Absent: {summary.daysAbsent}</span>
+                        <span>Total Hours: {formatShiftHours(summary.totalMinutes)}</span>
+                      </td>
+                    );
+                  })()}
+                </tr>
+              )}
+              {!periodAttendanceLoading && !periodAttendance && (
+                <tr>
+                  <td colSpan={3 + attendanceDates.length}>
+                    {periodAttendanceMessage || 'Attendance is unavailable.'}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
       <p className="attendance-current-status" role="status">
         {recordLoading
           ? 'Loading attendance...'

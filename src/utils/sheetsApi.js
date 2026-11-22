@@ -157,3 +157,48 @@ export function deleteStoredDocument(
     adminPassword,
   });
 }
+
+export function listWorkOrders(sessionToken) {
+  return requestSheetsApi({ action: 'listWorkOrders', sessionToken });
+}
+
+export function saveWorkOrder(sessionToken, workOrder) {
+  return requestSheetsApi(
+    { action: 'saveWorkOrder', sessionToken, ...workOrder },
+    120000,
+  );
+}
+
+export function saveMonthlyBill(sessionToken, bill) {
+  return requestSheetsApi(
+    { action: 'saveMonthlyBill', sessionToken, ...bill },
+    120000,
+  );
+}
+
+export function deleteMonthlyBill(sessionToken, billId, adminPassword) {
+  return requestSheetsApi({
+    action: 'deleteMonthlyBill',
+    sessionToken,
+    billId,
+    adminPassword,
+  });
+}
+
+export function setWorkOrderStatus(sessionToken, workOrderId, status) {
+  return requestSheetsApi({
+    action: 'setWorkOrderStatus',
+    sessionToken,
+    workOrderId,
+    status,
+  });
+}
+
+export function deleteWorkOrder(sessionToken, workOrderId, adminPassword) {
+  return requestSheetsApi({
+    action: 'deleteWorkOrder',
+    sessionToken,
+    workOrderId,
+    adminPassword,
+  });
+}

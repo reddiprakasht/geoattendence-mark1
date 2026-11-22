@@ -30,6 +30,12 @@ export default function App() {
       ) : (
         <LoginView onLogin={handleLogin} />
       )}
+      {user && (
+        <footer className="app-footer">
+          <span>GeoAttend</span>
+          <span>Secure operations dashboard</span>
+        </footer>
+      )}
     </main>
   );
 }

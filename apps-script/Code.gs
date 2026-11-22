@@ -1,5 +1,17 @@
 const WORKERS_SHEET = 'Workers';
 const ATTENDANCE_SHEET = 'Attendance';
+const WORK_ORDERS_SHEET = 'Work Orders';
+const MONTHLY_BILLS_SHEET = 'Monthly Bills';
+const WORK_ORDER_HEADERS = [
+  'ID', 'Work Order Number', 'Category', 'Total Allotted Quantity', 'Start Date',
+  'Duration Months', 'Document ID', 'Document Name', 'Document MIME Type', 'Created At',
+  'Plant', 'Contractor', 'Status',
+];
+const MONTHLY_BILL_HEADERS = [
+  'ID', 'Work Order ID', 'Billing Month', 'Bill Number', 'Billed Quantity',
+  'Document ID', 'Document Name', 'Document MIME Type', 'Created At', 'Updated At',
+];
+const WORK_ORDER_CATEGORIES = ['Manpower', 'Online Steam Leakage'];
 const SESSION_TTL_SECONDS = 21600;
 const PASSWORD_HASH_ITERATIONS = 10000;
 const DOCUMENTS_FOLDER_NAME = 'GeoAttend Documents';
@@ -107,6 +119,11 @@ function handleRequest_(payload) {
     const dateKey = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
     return getWorkerAttendance_(session, dateKey);
   }
+  if (payload.action === 'workerAttendanceRange') {
+    if (session.role !== 'worker') throw new Error('Only worker accounts can view their attendance.');
+    assertActiveWorker_(session);
+    return getWorkerAttendanceRange_(session, payload.startDate, payload.endDate);
+  }
   if (payload.action === 'addWorker') {
     if (session.role !== 'admin') throw new Error('Only administrators can add worker accounts.');
     return addWorker_(payload);
@@ -150,6 +167,38 @@ function handleRequest_(payload) {
     assertActiveAdmin_(session);
     verifyAdminPassword_(session, payload.adminPassword);
     return deleteDocument_(payload);
+  }
+  if (payload.action === 'listWorkOrders') {
+    if (session.role !== 'admin') throw new Error('Only administrators can view work orders.');
+    assertActiveAdmin_(session);
+    return listWorkOrders_();
+  }
+  if (payload.action === 'saveWorkOrder') {
+    if (session.role !== 'admin') throw new Error('Only administrators can add work orders.');
+    assertActiveAdmin_(session);
+    return saveWorkOrder_(payload);
+  }
+  if (payload.action === 'saveMonthlyBill') {
+    if (session.role !== 'admin') throw new Error('Only administrators can manage monthly bills.');
+    assertActiveAdmin_(session);
+    return saveMonthlyBill_(payload);
+  }
+  if (payload.action === 'setWorkOrderStatus') {
+    if (session.role !== 'admin') throw new Error('Only administrators can change work order status.');
+    assertActiveAdmin_(session);
+    return setWorkOrderStatus_(payload);
+  }
+  if (payload.action === 'deleteWorkOrder') {
+    if (session.role !== 'admin') throw new Error('Only administrators can delete work orders.');
+    assertActiveAdmin_(session);
+    verifyAdminPassword_(session, payload.adminPassword);
+    return deleteWorkOrder_(payload.workOrderId);
+  }
+  if (payload.action === 'deleteMonthlyBill') {
+    if (session.role !== 'admin') throw new Error('Only administrators can delete monthly bills.');
+    assertActiveAdmin_(session);
+    verifyAdminPassword_(session, payload.adminPassword);
+    return deleteMonthlyBill_(payload.billId);
   }
   if (payload.action === 'getGeofence') {
     const storedGeofence = PropertiesService.getScriptProperties().getProperty('SHARED_GEOFENCE');
@@ -328,9 +377,27 @@ function validateDocumentAssignments_(plant, contractor) {
 
 function formatDocumentMetadata_(metadata) {
   return 'geoattendance-category:' + metadata.category +
-    ';work-type:' + metadata.workType +
-    ';plant:' + metadata.plant +
-    ';contractor:' + metadata.contractor;
+    (metadata.workType ? ';work-type:' + metadata.workType : '') +
+    (metadata.plant && metadata.contractor
+      ? ';plant:' + metadata.plant + ';contractor:' + metadata.contractor
+      : '');
+}
+
+function isLedgerDocumentReferenced_(fileId) {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const references = [
+    { sheet: spreadsheet.getSheetByName(WORK_ORDERS_SHEET), column: 7 },
+    { sheet: spreadsheet.getSheetByName(MONTHLY_BILLS_SHEET), column: 6 },
+  ];
+  return references.some(function (reference) {
+    const sheet = reference.sheet;
+    return sheet && sheet.getLastRow() > 1 &&
+      sheet.getRange(2, reference.column, sheet.getLastRow() - 1, 1)
+        .getDisplayValues()
+        .some(function (row) {
+          return row[0] === fileId;
+        });
+  });
 }
 
 function matchesDocumentSignature_(bytes, mimeType) {
@@ -406,6 +473,9 @@ function deleteDocument_(payload) {
     ) {
       throw new Error('This document does not belong to the selected document categories.');
     }
+    if (isLedgerDocumentReferenced_(fileId)) {
+      throw new Error('This document is linked to a work order or bill and cannot be deleted here.');
+    }
 
     file.setTrashed(true);
     return { id: fileId, deleted: true };
@@ -463,6 +533,492 @@ function assignDocument_(payload) {
     }, updatedMetadata);
   }
   throw new Error('That document could not be found in the selected month.');
+}
+
+function getWorkOrderSheets_() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  return {
+    workOrders: getLedgerSheet_(spreadsheet, WORK_ORDERS_SHEET, WORK_ORDER_HEADERS),
+    bills: getLedgerSheet_(spreadsheet, MONTHLY_BILLS_SHEET, MONTHLY_BILL_HEADERS),
+  };
+}
+
+function getLedgerSheet_(spreadsheet, name, headers) {
+  let sheet = spreadsheet.getSheetByName(name);
+  if (!sheet) sheet = spreadsheet.insertSheet(name);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    return sheet;
+  }
+  if (name === WORK_ORDERS_SHEET &&
+      sheet.getLastColumn() === 10 &&
+      headers.slice(0, 10).every(function (header, index) {
+        return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) ===
+          normalizeHeader_(header);
+      })) {
+    sheet.getRange(1, 11, 1, 3).setValues([headers.slice(10)]);
+  }
+  if (name === WORK_ORDERS_SHEET &&
+      sheet.getLastColumn() === 12 &&
+      headers.slice(0, 12).every(function (header, index) {
+        return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) ===
+          normalizeHeader_(header);
+      })) {
+    sheet.getRange(1, 13, 1, 1).setValue(headers[12]);
+  }
+  if (sheet.getLastColumn() !== headers.length ||
+      headers.some(function (header, index) {
+        return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) !==
+          normalizeHeader_(header);
+      })) {
+    throw new Error('The "' + name + '" tab headers do not match the required format.');
+  }
+  return sheet;
+}
+
+function readLedgerRows_(sheet) {
+  if (sheet.getLastRow() < 2) return [];
+  return sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn())
+    .getValues()
+    .map(function (values, index) {
+      return { rowNumber: index + 2, values: values };
+    })
+    .filter(function (row) {
+      return row.values.some(function (value) {
+        return value !== '' && value !== null;
+      });
+    });
+}
+
+function ledgerDocument_(values, idIndex, nameIndex, mimeTypeIndex) {
+  const id = String(values[idIndex] || '');
+  const name = String(values[nameIndex] || '');
+  const mimeType = String(values[mimeTypeIndex] || '');
+  if (!id && !name && !mimeType) return null;
+  if (!id || !name || DOCUMENT_MIME_TYPES.indexOf(mimeType) < 0) {
+    throw new Error('A saved work order or bill has invalid document details.');
+  }
+  return { id: id, name: name, mimeType: mimeType };
+}
+
+function readLedgerQuantity_(value, fieldName) {
+  const quantity = Number(value);
+  if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 1000000000000) {
+    throw new Error('A saved ' + fieldName + ' must be a positive number.');
+  }
+  return quantity;
+}
+
+function listWorkOrders_() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheets = getWorkOrderSheets_();
+    const billsByWorkOrder = {};
+    readLedgerRows_(sheets.bills).forEach(function (row) {
+      const values = row.values;
+      const bill = {
+        id: String(values[0] || ''),
+        workOrderId: String(values[1] || ''),
+        month: String(values[2] || ''),
+        billNumber: String(values[3] || ''),
+        quantity: readLedgerQuantity_(values[4], 'billed quantity'),
+        document: ledgerDocument_(values, 5, 6, 7),
+        createdAt: String(values[8] || ''),
+        updatedAt: String(values[9] || ''),
+      };
+      if (!/^[a-f0-9]{32}$/i.test(bill.id) ||
+          !/^[a-f0-9]{32}$/i.test(bill.workOrderId) ||
+          !/^\d{4}-(0[1-9]|1[0-2])$/.test(bill.month) ||
+          !bill.billNumber) {
+        throw new Error('A saved monthly bill has invalid details.');
+      }
+      if (!billsByWorkOrder[bill.workOrderId]) billsByWorkOrder[bill.workOrderId] = [];
+      billsByWorkOrder[bill.workOrderId].push(bill);
+    });
+
+    const workOrders = readLedgerRows_(sheets.workOrders).map(function (row) {
+      const values = row.values;
+      const workOrder = {
+        id: String(values[0] || ''),
+        number: String(values[1] || ''),
+        category: String(values[2] || ''),
+        totalQuantity: readLedgerQuantity_(values[3], 'allotted quantity'),
+        startDate: String(values[4] || ''),
+        durationMonths: values[5] === '' || values[5] === null ? null : Number(values[5]),
+        document: ledgerDocument_(values, 6, 7, 8),
+        createdAt: String(values[9] || ''),
+        plant: String(values[10] || ''),
+        contractor: String(values[11] || ''),
+        active: String(values[12] || '').trim().toLowerCase() !== 'inactive',
+        bills: billsByWorkOrder[String(values[0] || '')] || [],
+      };
+      if (!/^[a-f0-9]{32}$/i.test(workOrder.id) ||
+          !workOrder.number ||
+          WORK_ORDER_CATEGORIES.indexOf(workOrder.category) < 0 ||
+          (workOrder.plant && DOCUMENT_PLANTS.indexOf(workOrder.plant) < 0) ||
+          (workOrder.contractor && DOCUMENT_CONTRACTORS.indexOf(workOrder.contractor) < 0) ||
+          (workOrder.startDate && !/^\d{4}-\d{2}-\d{2}$/.test(workOrder.startDate)) ||
+          (workOrder.durationMonths !== null &&
+            (!Number.isInteger(workOrder.durationMonths) || workOrder.durationMonths < 1))) {
+        throw new Error('A saved work order has invalid details.');
+      }
+      workOrder.consumedQuantity = workOrder.bills.reduce(function (total, bill) {
+        return total + bill.quantity;
+      }, 0);
+      workOrder.remainingQuantity = Math.max(0, workOrder.totalQuantity - workOrder.consumedQuantity);
+      if (workOrder.remainingQuantity <= 1e-9) workOrder.active = false;
+      return workOrder;
+    });
+    if (Object.keys(billsByWorkOrder).some(function (workOrderId) {
+      return !workOrders.some(function (workOrder) {
+        return workOrder.id === workOrderId;
+      });
+    })) {
+      throw new Error('A monthly bill refers to a work order that does not exist.');
+    }
+    workOrders.sort(function (first, second) {
+      return first.number.localeCompare(second.number);
+    });
+    workOrders.forEach(function (workOrder) {
+      workOrder.bills.sort(function (first, second) {
+        return first.month.localeCompare(second.month) ||
+          first.billNumber.localeCompare(second.billNumber);
+      });
+    });
+    return { workOrders: workOrders };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function validateWorkOrderFields_(payload) {
+  const number = typeof payload.number === 'string' ? payload.number.trim() : '';
+  const category = payload.category;
+  const plant = typeof payload.plant === 'string' ? payload.plant.trim() : '';
+  const contractor = typeof payload.contractor === 'string' ? payload.contractor.trim() : '';
+  const totalQuantity = Number(payload.totalQuantity);
+  const startDate = typeof payload.startDate === 'string' ? payload.startDate.trim() : '';
+  const durationMonths = payload.durationMonths === '' ||
+    payload.durationMonths === null || payload.durationMonths === undefined
+    ? null
+    : Number(payload.durationMonths);
+  if (!number || number.length > 100 || /[\u0000-\u001f\u007f]/.test(number)) {
+    throw new Error('Enter a valid work order number (up to 100 characters).');
+  }
+  if (WORK_ORDER_CATEGORIES.indexOf(category) < 0) {
+    throw new Error('Choose a valid category or service type.');
+  }
+  if (DOCUMENT_PLANTS.indexOf(plant) < 0) {
+    throw new Error('Choose a valid plant.');
+  }
+  if (DOCUMENT_CONTRACTORS.indexOf(contractor) < 0) {
+    throw new Error('Choose a valid contractor.');
+  }
+  if (!Number.isFinite(totalQuantity) || totalQuantity <= 0 ||
+      totalQuantity > 1000000000000) {
+    throw new Error('Enter a positive total allotted quantity.');
+  }
+  if (startDate && !isValidLedgerDate_(startDate)) {
+    throw new Error('Choose a valid work order start date.');
+  }
+  if (durationMonths !== null &&
+      (!Number.isInteger(durationMonths) || durationMonths < 1 || durationMonths > 120)) {
+    throw new Error('Duration must be between 1 and 120 months.');
+  }
+  return {
+    number: number,
+    category: category,
+    plant: plant,
+    contractor: contractor,
+    totalQuantity: totalQuantity,
+    startDate: startDate,
+    durationMonths: durationMonths,
+  };
+}
+
+function isValidLedgerDate_(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(value + 'T00:00:00Z');
+  return !isNaN(date.getTime()) &&
+    Utilities.formatDate(date, 'UTC', 'yyyy-MM-dd') === value;
+}
+
+function appendLedgerRow_(sheet, values) {
+  const targetRow = sheet.getLastRow() + 1;
+  sheet.getRange(targetRow, 1, 1, values.length).setNumberFormat('@');
+  sheet.getRange(targetRow, 1, 1, values.length).setValues([values]);
+}
+
+function uploadLedgerDocument_(document, category, workType, month) {
+  if (!document) return null;
+  if (!document || typeof document !== 'object') {
+    throw new Error('Choose a valid document.');
+  }
+  const documentMonth = validateDocumentMonth_(document.month || month);
+  const name = typeof document.name === 'string' ? document.name.trim() : '';
+  const mimeType = document.mimeType;
+  const encoded = document.base64;
+  if (!name || name.length > 180 || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw new Error('Choose a valid file name (up to 180 characters).');
+  }
+  if (DOCUMENT_MIME_TYPES.indexOf(mimeType) < 0) {
+    throw new Error('Upload a JPG, PNG, WebP image, or PDF file.');
+  }
+  if (typeof encoded !== 'string' || !encoded ||
+      encoded.length > 4 * Math.ceil(MAX_DOCUMENT_BYTES / 3)) {
+    throw new Error('Each document must be smaller than 8 MB.');
+  }
+  let bytes;
+  try {
+    bytes = Utilities.base64Decode(encoded);
+  } catch (error) {
+    throw new Error('The selected document could not be read. Choose it again and retry.');
+  }
+  if (!bytes.length || bytes.length > MAX_DOCUMENT_BYTES ||
+      !matchesDocumentSignature_(bytes, mimeType)) {
+    throw new Error('The file contents do not match a supported image or PDF type.');
+  }
+  const folder = getMonthFolder_(getDocumentsFolder_(), documentMonth, true);
+  const file = folder.createFile(Utilities.newBlob(bytes, mimeType, name));
+  file.setDescription(formatDocumentMetadata_({
+    category: category,
+    workType: workType,
+  }));
+  return {
+    id: file.getId(),
+    name: file.getName(),
+    mimeType: mimeType,
+  };
+}
+
+function saveWorkOrder_(payload) {
+  const fields = validateWorkOrderFields_(payload);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheets = getWorkOrderSheets_();
+    const existingNumbers = readLedgerRows_(sheets.workOrders).map(function (row) {
+      return String(row.values[1] || '').trim().toLowerCase();
+    });
+    if (existingNumbers.indexOf(fields.number.toLowerCase()) >= 0) {
+      throw new Error('That work order number already exists.');
+    }
+    const id = Utilities.getUuid().replace(/-/g, '');
+    const currentMonth = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM');
+    const document = uploadLedgerDocument_(
+      payload.document,
+      'work-order',
+      fields.category === 'Manpower' ? 'manpower-supply' : 'steam-line',
+      fields.startDate ? fields.startDate.slice(0, 7) : currentMonth,
+    );
+    appendLedgerRow_(sheets.workOrders, [
+      id, fields.number, fields.category, fields.totalQuantity, fields.startDate,
+      fields.durationMonths === null ? '' : fields.durationMonths,
+      document ? document.id : '',
+      document ? document.name : '',
+      document ? document.mimeType : '',
+      new Date().toISOString(),
+      fields.plant,
+      fields.contractor,
+      'Active',
+    ]);
+    return { saved: true, id: id };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function saveMonthlyBill_(payload) {
+  const workOrderId = typeof payload.workOrderId === 'string' ? payload.workOrderId : '';
+  const billId = typeof payload.billId === 'string' && payload.billId
+    ? payload.billId
+    : '';
+  const month = validateDocumentMonth_(payload.month);
+  const billNumber = typeof payload.billNumber === 'string' ? payload.billNumber.trim() : '';
+  const quantity = Number(payload.quantity);
+  if (!/^[a-f0-9]{32}$/i.test(workOrderId) ||
+      (billId && !/^[a-f0-9]{32}$/i.test(billId))) {
+    throw new Error('Choose a valid work order and bill.');
+  }
+  if (!billNumber || billNumber.length > 100 ||
+      /[\u0000-\u001f\u007f]/.test(billNumber)) {
+    throw new Error('Enter a valid bill number or reference (up to 100 characters).');
+  }
+  if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 1000000000000) {
+    throw new Error('Enter a positive billed quantity.');
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheets = getWorkOrderSheets_();
+    const workOrderRows = readLedgerRows_(sheets.workOrders);
+    const workOrderRow = workOrderRows.find(function (row) {
+      return String(row.values[0] || '') === workOrderId;
+    });
+    if (!workOrderRow) throw new Error('The selected work order could not be found.');
+    if (String(workOrderRow.values[12] || '').trim().toLowerCase() === 'inactive') {
+      throw new Error('This work order is inactive. Activate it before entering a monthly bill.');
+    }
+    const totalQuantity = readLedgerQuantity_(workOrderRow.values[3], 'allotted quantity');
+    const billRows = readLedgerRows_(sheets.bills);
+    const previousRow = billId ? billRows.find(function (row) {
+      return String(row.values[0] || '') === billId;
+    }) : null;
+    if (billId && !previousRow) throw new Error('The bill to edit could not be found.');
+    const consumedByOthers = billRows.reduce(function (total, row) {
+      return total + (
+        String(row.values[1] || '') === workOrderId &&
+        String(row.values[0] || '') !== billId
+          ? readLedgerQuantity_(row.values[4], 'billed quantity')
+          : 0
+      );
+    }, 0);
+    const availableQuantity = Math.max(0, totalQuantity - consumedByOthers);
+    if (quantity > availableQuantity + 1e-9) {
+      throw new Error(
+        'Billed quantity exceeds the remaining balance. Available quantity: ' +
+        availableQuantity + '.',
+      );
+    }
+
+    const workOrderCategory = String(workOrderRow.values[2] || '');
+    const document = payload.document
+      ? uploadLedgerDocument_(
+        payload.document,
+        'bill-copy',
+        workOrderCategory === 'Manpower' ? 'manpower-supply' : 'steam-line',
+        month,
+      )
+      : ledgerDocument_(previousRow ? previousRow.values : ['', '', '', '', '', '', '', ''], 5, 6, 7);
+    const id = billId || Utilities.getUuid().replace(/-/g, '');
+    const now = new Date().toISOString();
+    const values = [
+      id,
+      workOrderId,
+      month,
+      billNumber,
+      quantity,
+      document ? document.id : '',
+      document ? document.name : '',
+      document ? document.mimeType : '',
+      previousRow ? previousRow.values[8] : now,
+      now,
+    ];
+    if (previousRow) {
+      sheets.bills.getRange(previousRow.rowNumber, 1, 1, values.length)
+        .setNumberFormat('@');
+      sheets.bills.getRange(previousRow.rowNumber, 1, 1, values.length).setValues([values]);
+    } else {
+      appendLedgerRow_(sheets.bills, values);
+    }
+    const consumedAfterSave = consumedByOthers + quantity;
+    if (consumedAfterSave >= totalQuantity - 1e-9) {
+      sheets.workOrders.getRange(workOrderRow.rowNumber, 13).setValue('Inactive');
+    }
+    return { saved: true, id: id };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function deleteMonthlyBill_(billId) {
+  if (typeof billId !== 'string' || !/^[a-f0-9]{32}$/i.test(billId)) {
+    throw new Error('Choose a valid bill to delete.');
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheets = getWorkOrderSheets_();
+    const row = readLedgerRows_(sheets.bills).find(function (billRow) {
+      return String(billRow.values[0] || '') === billId;
+    });
+    if (!row) throw new Error('The bill to delete could not be found.');
+    const workOrderId = String(row.values[1] || '');
+    sheets.bills.deleteRow(row.rowNumber);
+    const workOrderRow = readLedgerRows_(sheets.workOrders).find(function (orderRow) {
+      return String(orderRow.values[0] || '') === workOrderId;
+    });
+    if (workOrderRow) {
+      const billRows = readLedgerRows_(sheets.bills).filter(function (billRow) {
+        return String(billRow.values[1] || '') === workOrderId;
+      });
+      const consumedQuantity = billRows.reduce(function (total, billRow) {
+        return total + readLedgerQuantity_(billRow.values[4], 'billed quantity');
+      }, 0);
+      const totalQuantity = readLedgerQuantity_(workOrderRow.values[3], 'allotted quantity');
+      if (consumedQuantity < totalQuantity - 1e-9) {
+        sheets.workOrders.getRange(workOrderRow.rowNumber, 13).setValue('Active');
+      }
+    }
+    return { id: billId, deleted: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function setWorkOrderStatus_(payload) {
+  const workOrderId = typeof payload.workOrderId === 'string' ? payload.workOrderId : '';
+  const status = String(payload.status || '').trim().toLowerCase();
+  if (!/^[a-f0-9]{32}$/i.test(workOrderId)) {
+    throw new Error('Choose a valid work order.');
+  }
+  if (status !== 'active' && status !== 'inactive') {
+    throw new Error('Choose a valid work order status.');
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheets = getWorkOrderSheets_();
+    const workOrderRow = readLedgerRows_(sheets.workOrders).find(function (row) {
+      return String(row.values[0] || '') === workOrderId;
+    });
+    if (!workOrderRow) throw new Error('The work order could not be found.');
+    const billRows = readLedgerRows_(sheets.bills).filter(function (row) {
+      return String(row.values[1] || '') === workOrderId;
+    });
+    const totalQuantity = readLedgerQuantity_(workOrderRow.values[3], 'allotted quantity');
+    const consumedQuantity = billRows.reduce(function (total, row) {
+      return total + readLedgerQuantity_(row.values[4], 'billed quantity');
+    }, 0);
+    if (status === 'active' && consumedQuantity >= totalQuantity - 1e-9) {
+      throw new Error('A completed work order cannot be activated until its quantity is reopened.');
+    }
+    sheets.workOrders.getRange(workOrderRow.rowNumber, 13).setValue(
+      status === 'active' ? 'Active' : 'Inactive',
+    );
+    return { id: workOrderId, status: status };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function deleteWorkOrder_(workOrderId) {
+  if (!/^[a-f0-9]{32}$/i.test(workOrderId)) {
+    throw new Error('Choose a valid work order to delete.');
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheets = getWorkOrderSheets_();
+    const workOrderRow = readLedgerRows_(sheets.workOrders).find(function (row) {
+      return String(row.values[0] || '') === workOrderId;
+    });
+    if (!workOrderRow) throw new Error('The work order to delete could not be found.');
+    const billRows = readLedgerRows_(sheets.bills).filter(function (row) {
+      return String(row.values[1] || '') === workOrderId;
+    });
+    billRows.sort(function (first, second) {
+      return second.rowNumber - first.rowNumber;
+    }).forEach(function (row) {
+      sheets.bills.deleteRow(row.rowNumber);
+    });
+    sheets.workOrders.deleteRow(workOrderRow.rowNumber);
+    return { id: workOrderId, deleted: true };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function addWorker_(payload) {
@@ -955,6 +1511,30 @@ function getWorkerAttendance_(session, dateKey) {
     p2Time: row[9] || '',
     outTime: outTime,
     status: inTime ? (outTime ? 'Present' : 'Currently Inside') : 'Absent',
+  };
+}
+
+function getWorkerAttendanceRange_(session, startDate, endDate) {
+  validateAttendanceRange_(startDate, endDate);
+  const days = {};
+  const attendance = getAttendanceSheet_().getDataRange().getDisplayValues();
+  attendance.slice(1).forEach(function (row) {
+    if (row[0] < startDate || row[0] > endDate ||
+        row[1] !== session.punchingNumber) return;
+    const inTime = row[7] || (row[3] === 'Present' ? row[4] : '');
+    if (!inTime) return;
+    days[row[0]] = {
+      inTime: inTime,
+      p1Time: row[8] || '',
+      p2Time: row[9] || '',
+      outTime: row[10] || '',
+      status: row[10] ? 'Present' : 'Currently Inside',
+    };
+  });
+  return {
+    punchingNumber: session.punchingNumber,
+    name: session.name,
+    days: days,
   };
 }
 

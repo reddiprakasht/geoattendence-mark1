@@ -41,7 +41,8 @@ create and remove worker accounts from **Accounts** in the admin dashboard; thes
 written to the `Workers` sheet. Removing an account preserves existing attendance records, blocks
 future sign-ins, and invalidates that worker's active attendance session. Passwords are hashed by
 Apps Script and are never saved in plaintext. Only accounts with the `Admin` role can manage workers
-or read shared attendance; only active accounts with the `Worker` role can submit a punch.
+or read the shared attendance register; active accounts with the `Worker` role can submit punches
+and view their own attendance history.
 Removing a worker requires the administrator's current password, verified by Apps Script.
 When creating a worker, administrators select a plant and contractor. The Accounts table can also
 update these assignments for existing workers. Older plant values or missing assignments appear as
@@ -61,6 +62,19 @@ Supported files are JPG, PNG, WebP, and PDF, up to 8 MB each. To authorize priva
 After changing `Code.gs`, deploy a new version of the existing Apps Script web app. Documents are
 served only through admin-authenticated app requests; do not make the Drive folder public.
 
+The **Work Orders** section tracks allotted quantities and monthly bills. The Apps Script creates
+two tabs on first use: `Work Orders` stores each unique work order number, category, allotted
+quantity, optional start date/duration, and its Drive document reference; `Monthly Bills` stores
+the work order ID, billing month, bill reference, billed quantity, and bill document reference.
+Consumed quantity is summed from the monthly bills, and the remaining quantity is calculated from
+the allotment. The app marks a work order **Low Balance** when 10% or less remains and **Completed**
+when the balance reaches zero. Monthly bill quantities are checked against the remaining balance
+on the server; editing or deleting a bill recalculates the balance. Deleting a bill requires the
+administrator's current password, and its uploaded copy remains in Documents. Documents linked to
+the ledger cannot be deleted from Documents while still referenced by a work order or bill.
+After deploying the updated `Code.gs`, open Work Orders while signed in as an administrator to
+create the tabs. Keep the spreadsheet private.
+
 The `Attendance` tab is created automatically and stores one record per worker per date. Worker
 attendance uses `IN`, optional `P1` and `P2` checks, then `OUT`; each event is timestamped by Apps
 Script and checks the shared geofence. `IN` is required first, each event can be recorded only once
@@ -77,10 +91,11 @@ coordinates themselves can still be spoofed on a device.
 
 Attendance recorded before this setup remains in the original browser's local storage and is not
 automatically imported into the sheet. The sheet retains records until an administrator removes
-them; the Attendance Register can display a selected month/year or a custom date range. Each
-worker row shows daily IN/OUT times and summarizes present days, absent days, and completed working
-hours; hovering over a daily cell shows the full punch breakdown. The factory boundary is shared
-through Apps Script settings, so an administrator should save it once after deployment.
+them; the Attendance Register uses a 16th-to-15th billing period for a selected month, or can display
+a custom date range. Workers can view their own read-only attendance register on the dashboard.
+Each worker row shows daily IN/OUT times and summarizes present days, absent days, and completed
+working hours; hovering over a daily cell shows the full punch breakdown. The factory boundary is
+shared through Apps Script settings, so an administrator should save it once after deployment.
 Existing local-only boundaries are shown on that device until the administrator saves one to share;
 existing circular boundaries can be shared without drawing a polygon.
 
