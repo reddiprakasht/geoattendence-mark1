@@ -594,11 +594,10 @@ function getLedgerSheet_(spreadsheet, name, headers) {
       normalizeHeader_(sheet.getRange(1, 11).getDisplayValue()) === 'quantity type') {
     sheet.getRange(1, 11).setValue(headers[10]);
   }
-  if (sheet.getLastColumn() !== headers.length ||
-      headers.some(function (header, index) {
-        return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) !==
-          normalizeHeader_(header);
-      })) {
+  if (headers.some(function (header, index) {
+    return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) !==
+      normalizeHeader_(header);
+  })) {
     throw new Error('The "' + name + '" tab headers do not match the required format.');
   }
   return sheet;
