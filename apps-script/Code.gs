@@ -5,13 +5,15 @@ const MONTHLY_BILLS_SHEET = 'Monthly Bills';
 const WORK_ORDER_HEADERS = [
   'ID', 'Work Order Number', 'Category', 'Total Allotted Quantity', 'Start Date',
   'Duration Months', 'Document ID', 'Document Name', 'Document MIME Type', 'Created At',
-  'Plant', 'Contractor', 'Status',
+  'Plant', 'Contractor', 'Status', 'Quantity Breakdown',
 ];
 const MONTHLY_BILL_HEADERS = [
   'ID', 'Work Order ID', 'Billing Month', 'Bill Number', 'Billed Quantity',
-  'Document ID', 'Document Name', 'Document MIME Type', 'Created At', 'Updated At',
+  'Document ID', 'Document Name', 'Document MIME Type', 'Created At', 'Updated At', 'Quantity Breakdown',
 ];
 const WORK_ORDER_CATEGORIES = ['Manpower', 'Online Steam Leakage'];
+const MANPOWER_QUANTITY_TYPES = ['Fitter', 'Kalasi'];
+const STEAM_LINE_QUANTITY_TYPES = ['2 Inch', '4 Inch', '6 Inch', '8 Inch', '10 Inch'];
 const SESSION_TTL_SECONDS = 21600;
 const PASSWORD_HASH_ITERATIONS = 10000;
 const DOCUMENTS_FOLDER_NAME = 'GeoAttend Documents';
@@ -566,6 +568,32 @@ function getLedgerSheet_(spreadsheet, name, headers) {
       })) {
     sheet.getRange(1, 13, 1, 1).setValue(headers[12]);
   }
+  if (name === WORK_ORDERS_SHEET &&
+      sheet.getLastColumn() === 13 &&
+      headers.slice(0, 13).every(function (header, index) {
+        return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) ===
+          normalizeHeader_(header);
+      })) {
+    sheet.getRange(1, 14, 1, 1).setValue(headers[13]);
+  }
+  if (name === WORK_ORDERS_SHEET &&
+      sheet.getLastColumn() === 14 &&
+      normalizeHeader_(sheet.getRange(1, 14).getDisplayValue()) === 'quantity type') {
+    sheet.getRange(1, 14).setValue(headers[13]);
+  }
+  if (name === MONTHLY_BILLS_SHEET &&
+      sheet.getLastColumn() === 10 &&
+      headers.slice(0, 10).every(function (header, index) {
+        return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) ===
+          normalizeHeader_(header);
+      })) {
+    sheet.getRange(1, 11, 1, 1).setValue(headers[10]);
+  }
+  if (name === MONTHLY_BILLS_SHEET &&
+      sheet.getLastColumn() === 11 &&
+      normalizeHeader_(sheet.getRange(1, 11).getDisplayValue()) === 'quantity type') {
+    sheet.getRange(1, 11).setValue(headers[10]);
+  }
   if (sheet.getLastColumn() !== headers.length ||
       headers.some(function (header, index) {
         return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) !==
@@ -609,6 +637,36 @@ function readLedgerQuantity_(value, fieldName) {
   return quantity;
 }
 
+function parseQuantityItems_(value, category, fieldName) {
+  if (!value) return [];
+  let items;
+  try {
+    items = JSON.parse(String(value));
+  } catch (error) {
+    throw new Error('A saved ' + fieldName + ' has invalid quantity details.');
+  }
+  if (!Array.isArray(items)) throw new Error('A saved ' + fieldName + ' has invalid quantity details.');
+  const validTypes = category === 'Manpower'
+    ? MANPOWER_QUANTITY_TYPES
+    : category === 'Online Steam Leakage'
+      ? STEAM_LINE_QUANTITY_TYPES
+      : MANPOWER_QUANTITY_TYPES.concat(STEAM_LINE_QUANTITY_TYPES);
+  const seen = {};
+  items.forEach(function (item) {
+    if (!item || validTypes.indexOf(item.quantityType) < 0 ||
+        !Number.isFinite(Number(item.quantity)) || Number(item.quantity) <= 0) {
+      throw new Error('A saved ' + fieldName + ' has invalid quantity details.');
+    }
+    if (seen[item.quantityType]) {
+      throw new Error('A ' + fieldName + ' cannot contain the same quantity type twice.');
+    }
+    seen[item.quantityType] = true;
+  });
+  return items.map(function (item) {
+    return { quantityType: item.quantityType, quantity: Number(item.quantity) };
+  });
+}
+
 function listWorkOrders_() {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
@@ -626,6 +684,7 @@ function listWorkOrders_() {
         document: ledgerDocument_(values, 5, 6, 7),
         createdAt: String(values[8] || ''),
         updatedAt: String(values[9] || ''),
+        quantityItems: parseQuantityItems_(values[10], '', 'billed quantity'),
       };
       if (!/^[a-f0-9]{32}$/i.test(bill.id) ||
           !/^[a-f0-9]{32}$/i.test(bill.workOrderId) ||
@@ -651,6 +710,7 @@ function listWorkOrders_() {
         plant: String(values[10] || ''),
         contractor: String(values[11] || ''),
         active: String(values[12] || '').trim().toLowerCase() !== 'inactive',
+        quantityItems: parseQuantityItems_(values[13], String(values[2] || ''), 'allotted quantity'),
         bills: billsByWorkOrder[String(values[0] || '')] || [],
       };
       if (!/^[a-f0-9]{32}$/i.test(workOrder.id) ||
@@ -692,12 +752,42 @@ function listWorkOrders_() {
   }
 }
 
+function validateSubmittedQuantityItems_(quantityItems, category) {
+  if (!Array.isArray(quantityItems) || quantityItems.length === 0) {
+    throw new Error('Enter at least one separate quantity.');
+  }
+  const validTypes = category === 'Manpower'
+    ? MANPOWER_QUANTITY_TYPES
+    : STEAM_LINE_QUANTITY_TYPES;
+  const seen = {};
+  return quantityItems.map(function (item) {
+    const quantityType = item && typeof item.quantityType === 'string'
+      ? item.quantityType.trim()
+      : '';
+    const quantity = Number(item && item.quantity);
+    if (validTypes.indexOf(quantityType) < 0) {
+      throw new Error('Choose a valid quantity type.');
+    }
+    if (seen[quantityType]) {
+      throw new Error('Do not add the same quantity type more than once.');
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 1000000000000) {
+      throw new Error('Enter a positive quantity for each quantity type.');
+    }
+    seen[quantityType] = true;
+    return { quantityType: quantityType, quantity: quantity };
+  });
+}
+
 function validateWorkOrderFields_(payload) {
   const number = typeof payload.number === 'string' ? payload.number.trim() : '';
   const category = payload.category;
   const plant = typeof payload.plant === 'string' ? payload.plant.trim() : '';
   const contractor = typeof payload.contractor === 'string' ? payload.contractor.trim() : '';
-  const totalQuantity = Number(payload.totalQuantity);
+  const quantityItems = validateSubmittedQuantityItems_(payload.quantityItems, category);
+  const totalQuantity = quantityItems.reduce(function (total, item) {
+    return total + item.quantity;
+  }, 0);
   const startDate = typeof payload.startDate === 'string' ? payload.startDate.trim() : '';
   const durationMonths = payload.durationMonths === '' ||
     payload.durationMonths === null || payload.durationMonths === undefined
@@ -732,6 +822,7 @@ function validateWorkOrderFields_(payload) {
     plant: plant,
     contractor: contractor,
     totalQuantity: totalQuantity,
+    quantityItems: quantityItems,
     startDate: startDate,
     durationMonths: durationMonths,
   };
@@ -822,6 +913,7 @@ function saveWorkOrder_(payload) {
       fields.plant,
       fields.contractor,
       'Active',
+      JSON.stringify(fields.quantityItems),
     ]);
     return { saved: true, id: id };
   } finally {
@@ -836,7 +928,6 @@ function saveMonthlyBill_(payload) {
     : '';
   const month = validateDocumentMonth_(payload.month);
   const billNumber = typeof payload.billNumber === 'string' ? payload.billNumber.trim() : '';
-  const quantity = Number(payload.quantity);
   if (!/^[a-f0-9]{32}$/i.test(workOrderId) ||
       (billId && !/^[a-f0-9]{32}$/i.test(billId))) {
     throw new Error('Choose a valid work order and bill.');
@@ -845,10 +936,6 @@ function saveMonthlyBill_(payload) {
       /[\u0000-\u001f\u007f]/.test(billNumber)) {
     throw new Error('Enter a valid bill number or reference (up to 100 characters).');
   }
-  if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 1000000000000) {
-    throw new Error('Enter a positive billed quantity.');
-  }
-
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
@@ -861,6 +948,11 @@ function saveMonthlyBill_(payload) {
     if (String(workOrderRow.values[12] || '').trim().toLowerCase() === 'inactive') {
       throw new Error('This work order is inactive. Activate it before entering a monthly bill.');
     }
+    const workOrderCategory = String(workOrderRow.values[2] || '');
+    const quantityItems = validateSubmittedQuantityItems_(payload.quantityItems, workOrderCategory);
+    const quantity = quantityItems.reduce(function (total, item) {
+      return total + item.quantity;
+    }, 0);
     const totalQuantity = readLedgerQuantity_(workOrderRow.values[3], 'allotted quantity');
     const billRows = readLedgerRows_(sheets.bills);
     const previousRow = billId ? billRows.find(function (row) {
@@ -883,7 +975,6 @@ function saveMonthlyBill_(payload) {
       );
     }
 
-    const workOrderCategory = String(workOrderRow.values[2] || '');
     const document = payload.document
       ? uploadLedgerDocument_(
         payload.document,
@@ -905,6 +996,7 @@ function saveMonthlyBill_(payload) {
       document ? document.mimeType : '',
       previousRow ? previousRow.values[8] : now,
       now,
+      JSON.stringify(quantityItems),
     ];
     if (previousRow) {
       sheets.bills.getRange(previousRow.rowNumber, 1, 1, values.length)

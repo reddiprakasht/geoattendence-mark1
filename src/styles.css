@@ -1354,6 +1354,46 @@ th {
   min-width: 0;
 }
 
+.work-order-quantity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0 14px;
+}
+
+.work-order-quantity-list > label {
+  margin: 0;
+  color: #263657;
+  font-weight: 700;
+}
+
+.work-order-quantity-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 0.7fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.work-order-quantity-row select,
+.work-order-quantity-row input {
+  width: 100%;
+  margin: 0;
+}
+
+.work-order-quantity-row .secondary-btn {
+  min-height: 48px;
+  height: 48px;
+  margin: 0;
+  padding: 0 18px;
+  white-space: nowrap;
+}
+
+.work-order-quantity-list > .secondary-btn {
+  width: 100%;
+  min-height: 48px;
+  margin: 0;
+}
+
 .work-order-form input[type="file"] {
   min-width: 0;
   padding: 10px;
@@ -1425,6 +1465,15 @@ th {
 
 .work-order-summary-table {
   min-width: 1260px;
+}
+
+.work-order-summary-table td small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+  white-space: normal;
 }
 
 .work-order-filters {
@@ -1508,6 +1557,7 @@ th {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   font-size: 0.78rem;
   line-height: 1.25;
@@ -1906,6 +1956,14 @@ a:focus-visible {
 
   .work-order-form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .work-order-quantity-row {
+    grid-template-columns: minmax(0, 1fr) minmax(100px, 0.7fr);
+  }
+
+  .work-order-quantity-row .secondary-btn {
+    grid-column: 1 / -1;
   }
 
   .work-order-ledger-heading {

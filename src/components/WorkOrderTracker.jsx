@@ -13,6 +13,8 @@ import { getLocalDateKey } from '../utils/storage.js';
 
 const DOCUMENT_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 const WORK_ORDER_CATEGORIES = ['Manpower', 'Online Steam Leakage'];
+const MANPOWER_QUANTITY_TYPES = ['Fitter', 'Kalasi'];
+const STEAM_LINE_QUANTITY_TYPES = ['2 Inch', '4 Inch', '6 Inch', '8 Inch', '10 Inch'];
 const WORK_ORDER_PLANTS = [
   { value: 'power-plant', label: 'POWER PLANT' },
   { value: 'brine-plant', label: 'BRINE PLANT' },
@@ -38,10 +40,16 @@ const EMPTY_WORK_ORDER = {
   category: WORK_ORDER_CATEGORIES[0],
   plant: '',
   contractor: '',
-  totalQuantity: '',
+  quantityItems: [{ quantityType: '', quantity: '' }],
   startDate: '',
   durationMonths: '',
 };
+
+function getQuantityTypes(category) {
+  return category === 'Manpower'
+    ? MANPOWER_QUANTITY_TYPES
+    : STEAM_LINE_QUANTITY_TYPES;
+}
 
 function getPlantLabel(value) {
   return WORK_ORDER_PLANTS.find((plant) => plant.value === value)?.label || 'Not assigned';
@@ -69,6 +77,7 @@ function isWorkOrderResponse(value) {
       typeof workOrder.id === 'string' &&
       typeof workOrder.number === 'string' &&
       WORK_ORDER_CATEGORIES.includes(workOrder.category) &&
+      Array.isArray(workOrder.quantityItems) &&
       typeof workOrder.active === 'boolean' &&
       (workOrder.plant === '' || WORK_ORDER_PLANTS.some((plant) => plant.value === workOrder.plant)) &&
       (workOrder.contractor === '' ||
@@ -89,6 +98,7 @@ function isWorkOrderResponse(value) {
         /^\d{4}-(0[1-9]|1[0-2])$/.test(bill.month) &&
         typeof bill.billNumber === 'string' &&
         Number.isFinite(bill.quantity) &&
+        Array.isArray(bill.quantityItems) &&
         isDocument(bill.document)
       )
     );
@@ -96,6 +106,41 @@ function isWorkOrderResponse(value) {
 
 function formatQuantity(quantity) {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(quantity);
+}
+
+function formatQuantityBreakdown(quantityItems) {
+  if (!Array.isArray(quantityItems) || quantityItems.length === 0) return '';
+  return quantityItems
+    .map((item) => `${item.quantityType}: ${formatQuantity(item.quantity)}`)
+    .join('  |  ');
+}
+
+function getConsumedQuantityItems(workOrder) {
+  const totalsByType = new Map();
+  workOrder.bills.forEach((bill) => {
+    if (!Array.isArray(bill.quantityItems)) return;
+    bill.quantityItems.forEach((item) => {
+      totalsByType.set(
+        item.quantityType,
+        (totalsByType.get(item.quantityType) || 0) + item.quantity,
+      );
+    });
+  });
+  return [...totalsByType.entries()].map(([quantityType, quantity]) => ({
+    quantityType,
+    quantity,
+  }));
+}
+
+function getRemainingQuantityItems(workOrder) {
+  if (!Array.isArray(workOrder.quantityItems)) return [];
+  const consumedByType = new Map(
+    getConsumedQuantityItems(workOrder).map((item) => [item.quantityType, item.quantity]),
+  );
+  return workOrder.quantityItems.map((item) => ({
+    quantityType: item.quantityType,
+    quantity: Math.max(0, item.quantity - (consumedByType.get(item.quantityType) || 0)),
+  }));
 }
 
 function getWorkOrderStatus(workOrder) {
@@ -114,17 +159,34 @@ function getWorkOrderStatus(workOrder) {
 function getMonthlyBillTotals(workOrder) {
   const totalsByMonth = new Map();
   workOrder.bills.forEach((bill) => {
-    totalsByMonth.set(bill.month, (totalsByMonth.get(bill.month) || 0) + bill.quantity);
+    const current = totalsByMonth.get(bill.month) || {
+      quantity: 0,
+      quantityItems: new Map(),
+    };
+    current.quantity += bill.quantity;
+    if (Array.isArray(bill.quantityItems)) {
+      bill.quantityItems.forEach((item) => {
+        current.quantityItems.set(
+          item.quantityType,
+          (current.quantityItems.get(item.quantityType) || 0) + item.quantity,
+        );
+      });
+    }
+    totalsByMonth.set(bill.month, current);
   });
 
   let billedSoFar = 0;
   return [...totalsByMonth.entries()]
     .sort(([firstMonth], [secondMonth]) => firstMonth.localeCompare(secondMonth))
-    .map(([month, quantity]) => {
-      billedSoFar += quantity;
+    .map(([month, total]) => {
+      billedSoFar += total.quantity;
       return {
         month,
-        quantity,
+        quantity: total.quantity,
+        quantityItems: [...total.quantityItems.entries()].map(([quantityType, quantity]) => ({
+          quantityType,
+          quantity,
+        })),
         remainingQuantity: Math.max(0, workOrder.totalQuantity - billedSoFar),
       };
     });
@@ -146,7 +208,7 @@ export default function WorkOrderTracker({ user }) {
     workOrderId: '',
     month: getLocalDateKey().slice(0, 7),
     billNumber: '',
-    quantity: '',
+    quantityItems: [{ quantityType: '', quantity: '' }],
   });
   const [editingBill, setEditingBill] = useState(null);
   const [savingBill, setSavingBill] = useState(false);
@@ -225,9 +287,11 @@ export default function WorkOrderTracker({ user }) {
     ? selectedWorkOrder.remainingQuantity +
       (editingBill?.workOrderId === selectedWorkOrder.id ? editingBill.quantity : 0)
     : 0;
-  const billQuantity = Number(billForm.quantity);
-  const billExceedsBalance = billForm.quantity !== '' &&
-    Number.isFinite(billQuantity) &&
+  const billQuantity = billForm.quantityItems.reduce(
+    (total, item) => total + (Number(item.quantity) || 0),
+    0,
+  );
+  const billExceedsBalance = billForm.quantityItems.some((item) => item.quantity !== '') &&
     billQuantity > availableQuantity + 1e-9;
   const filteredWorkOrders = useMemo(() => {
     const query = workOrderSearchQuery.trim().toLowerCase();
@@ -245,11 +309,71 @@ export default function WorkOrderTracker({ user }) {
   }, [workOrders, workOrderSearchQuery, plantFilter, contractorFilter, statusFilter]);
 
   function updateWorkOrderForm(field, value) {
-    setWorkOrderForm((current) => ({ ...current, [field]: value }));
+    setWorkOrderForm((current) => ({
+      ...current,
+      [field]: value,
+      ...(field === 'category'
+        ? { quantityItems: [{ quantityType: '', quantity: '' }] }
+        : {}),
+    }));
+  }
+
+  function updateWorkOrderQuantity(index, field, value) {
+    setWorkOrderForm((current) => ({
+      ...current,
+      quantityItems: current.quantityItems.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, [field]: value } : item),
+    }));
+  }
+
+  function addWorkOrderQuantity() {
+    setWorkOrderForm((current) => ({
+      ...current,
+      quantityItems: [...current.quantityItems, { quantityType: '', quantity: '' }],
+    }));
+  }
+
+  function removeWorkOrderQuantity(index) {
+    setWorkOrderForm((current) => ({
+      ...current,
+      quantityItems: current.quantityItems.length === 1
+        ? current.quantityItems
+        : current.quantityItems.filter((_, itemIndex) => itemIndex !== index),
+    }));
   }
 
   function updateBillForm(field, value) {
-    setBillForm((current) => ({ ...current, [field]: value }));
+    setBillForm((current) => ({
+      ...current,
+      [field]: value,
+      ...(field === 'workOrderId'
+        ? { quantityItems: [{ quantityType: '', quantity: '' }] }
+        : {}),
+    }));
+  }
+
+  function updateBillQuantity(index, field, value) {
+    setBillForm((current) => ({
+      ...current,
+      quantityItems: current.quantityItems.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, [field]: value } : item),
+    }));
+  }
+
+  function addBillQuantity() {
+    setBillForm((current) => ({
+      ...current,
+      quantityItems: [...current.quantityItems, { quantityType: '', quantity: '' }],
+    }));
+  }
+
+  function removeBillQuantity(index) {
+    setBillForm((current) => ({
+      ...current,
+      quantityItems: current.quantityItems.length === 1
+        ? current.quantityItems
+        : current.quantityItems.filter((_, itemIndex) => itemIndex !== index),
+    }));
   }
 
   function reloadLedger() {
@@ -270,7 +394,11 @@ export default function WorkOrderTracker({ user }) {
         category: workOrderForm.category,
         plant: workOrderForm.plant,
         contractor: workOrderForm.contractor,
-        totalQuantity: workOrderForm.totalQuantity,
+        quantityItems: workOrderForm.quantityItems,
+        totalQuantity: workOrderForm.quantityItems.reduce(
+          (total, item) => total + (Number(item.quantity) || 0),
+          0,
+        ),
         startDate: workOrderForm.startDate,
         durationMonths: workOrderForm.durationMonths,
         document: null,
@@ -306,6 +434,10 @@ export default function WorkOrderTracker({ user }) {
       });
       return;
     }
+    if (billForm.quantityItems.some((item) => !item.quantityType || !item.quantity)) {
+      setMessage({ text: 'Choose a billed quantity type.', type: 'error' });
+      return;
+    }
     setSavingBill(true);
     setMessage({ text: editingBill ? 'Updating monthly bill...' : 'Saving monthly bill...', type: 'info' });
     try {
@@ -314,17 +446,21 @@ export default function WorkOrderTracker({ user }) {
         workOrderId: billForm.workOrderId,
         month: billForm.month,
         billNumber: billForm.billNumber,
-        quantity: billForm.quantity,
+        quantityItems: billForm.quantityItems,
+        quantity: billForm.quantityItems.reduce(
+          (total, item) => total + (Number(item.quantity) || 0),
+          0,
+        ),
         document: null,
       });
       if (!response || response.saved !== true || typeof response.id !== 'string') {
         throw new Error('The saved monthly bill response was invalid.');
       }
       setBillForm({
-        workOrderId: activeWorkOrders[0]?.id || '',
+        workOrderId: '',
         month: getLocalDateKey().slice(0, 7),
         billNumber: '',
-        quantity: '',
+        quantityItems: [{ quantityType: '', quantity: '' }],
       });
       setEditingBill(null);
       setMessage({
@@ -348,7 +484,9 @@ export default function WorkOrderTracker({ user }) {
       workOrderId: workOrder.id,
       month: bill.month,
       billNumber: bill.billNumber,
-      quantity: String(bill.quantity),
+      quantityItems: bill.quantityItems?.length
+        ? bill.quantityItems.map((item) => ({ ...item, quantity: String(item.quantity) }))
+        : [{ quantityType: '', quantity: String(bill.quantity) }],
     });
     setExpandedWorkOrderId(workOrder.id);
     setMessage({ text: '', type: 'info' });
@@ -357,10 +495,10 @@ export default function WorkOrderTracker({ user }) {
   function cancelBillEdit() {
     setEditingBill(null);
     setBillForm({
-      workOrderId: activeWorkOrders[0]?.id || '',
+      workOrderId: '',
       month: getLocalDateKey().slice(0, 7),
       billNumber: '',
-      quantity: '',
+      quantityItems: [{ quantityType: '', quantity: '' }],
     });
     setMessage({ text: '', type: 'info' });
   }
@@ -522,6 +660,7 @@ export default function WorkOrderTracker({ user }) {
           <label htmlFor="work-order-category">Category / service type:</label>
           <select
             id="work-order-category"
+            required
             value={workOrderForm.category}
             disabled={savingWorkOrder}
             onChange={(event) => updateWorkOrderForm('category', event.target.value)}
@@ -562,17 +701,44 @@ export default function WorkOrderTracker({ user }) {
               </select>
             </div>
           </div>
-          <label htmlFor="work-order-total">Total allotted quantity:</label>
-          <input
-            id="work-order-total"
-            type="number"
-            min="0.001"
-            step="any"
-            required
-            value={workOrderForm.totalQuantity}
-            disabled={savingWorkOrder}
-            onChange={(event) => updateWorkOrderForm('totalQuantity', event.target.value)}
-          />
+          <div className="work-order-quantity-list">
+            <label>Separate quantities:</label>
+            {workOrderForm.quantityItems.map((item, index) => (
+              <div className="work-order-quantity-row" key={index}>
+                <select
+                  aria-label={`Quantity type ${index + 1}`}
+                  required
+                  value={item.quantityType}
+                  disabled={savingWorkOrder}
+                  onChange={(event) => updateWorkOrderQuantity(index, 'quantityType', event.target.value)}
+                >
+                  <option value="">Choose quantity type</option>
+                  {getQuantityTypes(workOrderForm.category).map((quantityType) => (
+                    <option key={quantityType} value={quantityType}>{quantityType}</option>
+                  ))}
+                </select>
+                <input
+                  aria-label={`Quantity ${index + 1}`}
+                  type="number"
+                  min="0.001"
+                  step="any"
+                  required
+                  placeholder="Quantity"
+                  value={item.quantity}
+                  disabled={savingWorkOrder}
+                  onChange={(event) => updateWorkOrderQuantity(index, 'quantity', event.target.value)}
+                />
+                {workOrderForm.quantityItems.length > 1 && (
+                  <button type="button" className="secondary-btn" onClick={() => removeWorkOrderQuantity(index)}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            ))}
+            <button type="button" className="secondary-btn" onClick={addWorkOrderQuantity}>
+              Add another quantity
+            </button>
+          </div>
           <div className="work-order-form-grid">
             <div>
               <label htmlFor="work-order-start-date">Start date (optional):</label>
@@ -603,7 +769,9 @@ export default function WorkOrderTracker({ user }) {
             disabled={
               savingWorkOrder ||
               !workOrderForm.plant ||
-              !workOrderForm.contractor
+              !workOrderForm.contractor ||
+              workOrderForm.quantityItems.some((item) =>
+                !item.quantityType || !item.quantity)
             }
           >
             {savingWorkOrder ? 'Saving work order...' : 'Add Work Order'}
@@ -692,17 +860,45 @@ export default function WorkOrderTracker({ user }) {
               />
             </div>
           </div>
-          <label htmlFor="monthly-bill-quantity">Billed quantity:</label>
-          <input
-            id="monthly-bill-quantity"
-            type="number"
-            min="0.001"
-            step="any"
-            required
-            value={billForm.quantity}
-            disabled={savingBill}
-            onChange={(event) => updateBillForm('quantity', event.target.value)}
-          />
+          <div className="work-order-quantity-list">
+            <label>Separate billed quantities:</label>
+            {billForm.quantityItems.map((item, index) => (
+              <div className="work-order-quantity-row" key={index}>
+                <select
+                  aria-label={`Billed quantity type ${index + 1}`}
+                  required
+                  value={item.quantityType}
+                  disabled={savingBill || !selectedWorkOrder}
+                  onChange={(event) => updateBillQuantity(index, 'quantityType', event.target.value)}
+                >
+                  <option value="">Choose billed quantity type</option>
+                  {selectedWorkOrder &&
+                    getQuantityTypes(selectedWorkOrder.category).map((quantityType) => (
+                      <option key={quantityType} value={quantityType}>{quantityType}</option>
+                    ))}
+                </select>
+                <input
+                  aria-label={`Billed quantity ${index + 1}`}
+                  type="number"
+                  min="0.001"
+                  step="any"
+                  required
+                  placeholder="Quantity"
+                  value={item.quantity}
+                  disabled={savingBill}
+                  onChange={(event) => updateBillQuantity(index, 'quantity', event.target.value)}
+                />
+                {billForm.quantityItems.length > 1 && (
+                  <button type="button" className="secondary-btn" onClick={() => removeBillQuantity(index)}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            ))}
+            <button type="button" className="secondary-btn" disabled={!selectedWorkOrder} onClick={addBillQuantity}>
+              Add another billed quantity
+            </button>
+          </div>
           <p className={`work-order-availability ${billExceedsBalance ? 'message-error' : ''}`}>
             Available to bill: {formatQuantity(availableQuantity)}
           </p>
@@ -724,6 +920,8 @@ export default function WorkOrderTracker({ user }) {
                 savingBill ||
                 billWorkOrderOptions.length === 0 ||
                 !billForm.workOrderId ||
+                billForm.quantityItems.some((item) =>
+                  !item.quantityType || !item.quantity) ||
                 billExceedsBalance
               }
             >
@@ -1025,6 +1223,8 @@ function FragmentRows({
   onDeleteWorkOrder,
 }) {
   const monthlyTotals = getMonthlyBillTotals(workOrder);
+  const consumedQuantityItems = getConsumedQuantityItems(workOrder);
+  const remainingQuantityItems = getRemainingQuantityItems(workOrder);
 
   return (
     <>
@@ -1043,7 +1243,12 @@ function FragmentRows({
         <td>{workOrder.category}</td>
         <td>{getPlantLabel(workOrder.plant)}</td>
         <td>{getContractorLabel(workOrder.contractor)}</td>
-        <td>{formatQuantity(workOrder.totalQuantity)}</td>
+        <td>
+          <strong>{formatQuantity(workOrder.totalQuantity)}</strong>
+          {workOrder.quantityItems?.length > 0 && (
+            <small>{formatQuantityBreakdown(workOrder.quantityItems)}</small>
+          )}
+        </td>
         <td>
           {monthlyTotals.length === 0 ? (
             <span className="work-order-monthly-empty">No billing yet</span>
@@ -1053,13 +1258,26 @@ function FragmentRows({
                 <div className="work-order-monthly-item" key={monthlyTotal.month}>
                   <span>{formatBillingMonth(monthlyTotal.month)}</span>
                   <strong>{formatQuantity(monthlyTotal.quantity)}</strong>
+                  {monthlyTotal.quantityItems.length > 0 && (
+                    <small>{formatQuantityBreakdown(monthlyTotal.quantityItems)}</small>
+                  )}
                 </div>
               ))}
             </div>
           )}
         </td>
-        <td>{formatQuantity(workOrder.consumedQuantity)}</td>
-        <td><strong>{formatQuantity(workOrder.remainingQuantity)}</strong></td>
+        <td>
+          <strong>{formatQuantity(workOrder.consumedQuantity)}</strong>
+          {consumedQuantityItems.length > 0 && (
+            <small>{formatQuantityBreakdown(consumedQuantityItems)}</small>
+          )}
+        </td>
+        <td>
+          <strong>{formatQuantity(workOrder.remainingQuantity)}</strong>
+          {remainingQuantityItems.length > 0 && (
+            <small>{formatQuantityBreakdown(remainingQuantityItems)}</small>
+          )}
+        </td>
         <td>
           <span className={`work-order-status ${status.className}`}>{status.label}</span>
         </td>
@@ -1133,7 +1351,12 @@ function FragmentRows({
                         {monthlyTotals.map((monthlyTotal) => (
                           <tr key={monthlyTotal.month}>
                             <td>{formatBillingMonth(monthlyTotal.month)}</td>
-                            <td>{formatQuantity(monthlyTotal.quantity)}</td>
+                            <td>
+                              {formatQuantity(monthlyTotal.quantity)}
+                              {monthlyTotal.quantityItems.length > 0 && (
+                                <small>{formatQuantityBreakdown(monthlyTotal.quantityItems)}</small>
+                              )}
+                            </td>
                             <td>{formatQuantity(monthlyTotal.remainingQuantity)}</td>
                           </tr>
                         ))}
@@ -1155,7 +1378,16 @@ function FragmentRows({
                           <tr key={bill.id}>
                             <td>{formatBillingMonth(bill.month)}</td>
                             <td>{bill.billNumber}</td>
-                            <td>{formatQuantity(bill.quantity)}</td>
+                            <td>
+                              {formatQuantity(bill.quantity)}
+                              {bill.quantityItems?.length > 0 && (
+                                <span>
+                                  {' — '}
+                                  {bill.quantityItems.map((item) =>
+                                    `${item.quantityType}: ${formatQuantity(item.quantity)}`).join(', ')}
+                                </span>
+                              )}
+                            </td>
                             <td>
                               <div className="work-order-bill-actions">
                                 <button
