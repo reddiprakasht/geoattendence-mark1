@@ -76,7 +76,7 @@ function rootCertificateDownload() {
 export default defineConfig(({ command }) => {
   const server = { host: true, port: 5173, strictPort: true };
 
-  if (command === 'serve') {
+  if (command === 'serve' && process.env.NETLIFY_DEV !== 'true') {
     execFileSync(
       mkcertPath,
       [

@@ -10,9 +10,12 @@ import {
   setWorkOrderStatus,
 } from '../utils/sheetsApi.js';
 import { getLocalDateKey } from '../utils/storage.js';
+import DocumentIntake from './DocumentIntake.jsx';
+import { formatDocumentDate } from '../utils/documentData.js';
 
 const DOCUMENT_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
-const WORK_ORDER_CATEGORIES = ['Manpower', 'Online Steam Leakage'];
+const WORK_ORDER_CATEGORIES = ['Manpower', 'Online Steam Leakage', 'ERP Work Order'];
+const MANUAL_WORK_ORDER_CATEGORIES = ['Manpower', 'Online Steam Leakage'];
 const MANPOWER_QUANTITY_TYPES = ['Fitter', 'Kalasi'];
 const STEAM_LINE_QUANTITY_TYPES = ['2 Inch', '4 Inch', '6 Inch', '8 Inch', '10 Inch'];
 const WORK_ORDER_PLANTS = [
@@ -45,19 +48,38 @@ const EMPTY_WORK_ORDER = {
   durationMonths: '',
 };
 
-function getQuantityTypes(category) {
-  return category === 'Manpower'
-    ? MANPOWER_QUANTITY_TYPES
-    : STEAM_LINE_QUANTITY_TYPES;
+function getQuantityTypes(category, workOrder) {
+  if (category === 'ERP Work Order') {
+    return [...new Set((workOrder?.lineItems || []).map((item) => item.uom).filter(Boolean))];
+  }
+  return category === 'Manpower' ? MANPOWER_QUANTITY_TYPES : STEAM_LINE_QUANTITY_TYPES;
 }
 
 function getPlantLabel(value) {
-  return WORK_ORDER_PLANTS.find((plant) => plant.value === value)?.label || 'Not assigned';
+  return WORK_ORDER_PLANTS.find((plant) => plant.value === value)?.label || value || 'Not assigned';
 }
 
 function getContractorLabel(value) {
   return WORK_ORDER_CONTRACTORS.find((contractor) => contractor.value === value)?.label ||
+    value ||
     'Not assigned';
+}
+
+function hasRemainingQuantity(workOrder) {
+  return Array.isArray(workOrder.lineItems) && workOrder.lineItems.length
+    ? workOrder.lineItems.some((item) => Number(item.remainingQuantity) > 1e-9)
+    : workOrder.remainingQuantity > 1e-9;
+}
+
+function getIssuedQuantityItems(workOrder) {
+  if (workOrder.lineItems?.length) {
+    const totals = new Map();
+    workOrder.lineItems.forEach((item) => {
+      totals.set(item.uom, (totals.get(item.uom) || 0) + item.quantity);
+    });
+    return [...totals.entries()].map(([quantityType, quantity]) => ({ quantityType, quantity }));
+  }
+  return workOrder.quantityItems || [];
 }
 
 function isDocument(value) {
@@ -79,9 +101,8 @@ function isWorkOrderResponse(value) {
       WORK_ORDER_CATEGORIES.includes(workOrder.category) &&
       Array.isArray(workOrder.quantityItems) &&
       typeof workOrder.active === 'boolean' &&
-      (workOrder.plant === '' || WORK_ORDER_PLANTS.some((plant) => plant.value === workOrder.plant)) &&
-      (workOrder.contractor === '' ||
-        WORK_ORDER_CONTRACTORS.some((contractor) => contractor.value === workOrder.contractor)) &&
+      typeof workOrder.plant === 'string' &&
+      typeof workOrder.contractor === 'string' &&
       Number.isFinite(workOrder.totalQuantity) &&
       Number.isFinite(workOrder.consumedQuantity) &&
       Number.isFinite(workOrder.remainingQuantity) &&
@@ -118,6 +139,13 @@ function formatQuantityBreakdown(quantityItems) {
 function getConsumedQuantityItems(workOrder) {
   const totalsByType = new Map();
   workOrder.bills.forEach((bill) => {
+    if (bill.approvalStatus && bill.approvalStatus !== 'approved') return;
+    if (Array.isArray(bill.lineItems) && bill.lineItems.length) {
+      bill.lineItems.forEach((item) => {
+        totalsByType.set(item.uom, (totalsByType.get(item.uom) || 0) + item.quantity);
+      });
+      return;
+    }
     if (!Array.isArray(bill.quantityItems)) return;
     bill.quantityItems.forEach((item) => {
       totalsByType.set(
@@ -132,7 +160,31 @@ function getConsumedQuantityItems(workOrder) {
   }));
 }
 
+function getLineItemQuantityTotals(lineItems) {
+  const totalsByUom = new Map();
+  lineItems.forEach((item) => {
+    totalsByUom.set(item.uom, (totalsByUom.get(item.uom) || 0) + item.quantity);
+  });
+  return [...totalsByUom.entries()].map(([quantityType, quantity]) => ({
+    quantityType,
+    quantity,
+  }));
+}
+
 function getRemainingQuantityItems(workOrder) {
+  if (workOrder.lineItems?.length) {
+    const remainingByType = new Map();
+    workOrder.lineItems.forEach((item) => {
+      remainingByType.set(
+        item.uom,
+        (remainingByType.get(item.uom) || 0) + Number(item.remainingQuantity || 0),
+      );
+    });
+    return [...remainingByType.entries()].map(([quantityType, quantity]) => ({
+      quantityType,
+      quantity,
+    }));
+  }
   if (!Array.isArray(workOrder.quantityItems)) return [];
   const consumedByType = new Map(
     getConsumedQuantityItems(workOrder).map((item) => [item.quantityType, item.quantity]),
@@ -144,11 +196,16 @@ function getRemainingQuantityItems(workOrder) {
 }
 
 function getWorkOrderStatus(workOrder) {
+  if (!hasRemainingQuantity(workOrder)) {
+    return { label: 'Completed', className: 'completed' };
+  }
   if (!workOrder.active) {
     return { label: 'Inactive', className: 'inactive' };
   }
-  if (workOrder.remainingQuantity <= 1e-9) {
-    return { label: 'Completed', className: 'completed' };
+  if (workOrder.lineItems?.length) {
+    const hasLowItem = workOrder.lineItems.some((item) =>
+      Number(item.remainingQuantity) <= Number(item.quantity) * 0.3);
+    if (hasLowItem) return { label: 'Low Balance', className: 'low' };
   }
   if (workOrder.remainingQuantity <= workOrder.totalQuantity * 0.3) {
     return { label: 'Low Balance', className: 'low' };
@@ -161,16 +218,29 @@ function getMonthlyBillTotals(workOrder) {
   workOrder.bills.forEach((bill) => {
     const current = totalsByMonth.get(bill.month) || {
       quantity: 0,
+      legacyQuantity: 0,
+      hasErpLineItems: false,
       quantityItems: new Map(),
     };
-    current.quantity += bill.quantity;
-    if (Array.isArray(bill.quantityItems)) {
-      bill.quantityItems.forEach((item) => {
+    if (bill.approvalStatus && bill.approvalStatus !== 'approved') return;
+    if (bill.lineItems?.length) {
+      current.hasErpLineItems = true;
+      bill.lineItems.forEach((item) => {
         current.quantityItems.set(
-          item.quantityType,
-          (current.quantityItems.get(item.quantityType) || 0) + item.quantity,
+          item.uom,
+          (current.quantityItems.get(item.uom) || 0) + item.quantity,
         );
       });
+    } else {
+      current.legacyQuantity += bill.quantity;
+      if (Array.isArray(bill.quantityItems)) {
+        bill.quantityItems.forEach((item) => {
+          current.quantityItems.set(
+            item.quantityType,
+            (current.quantityItems.get(item.quantityType) || 0) + item.quantity,
+          );
+        });
+      }
     }
     totalsByMonth.set(bill.month, current);
   });
@@ -179,15 +249,24 @@ function getMonthlyBillTotals(workOrder) {
   return [...totalsByMonth.entries()]
     .sort(([firstMonth], [secondMonth]) => firstMonth.localeCompare(secondMonth))
     .map(([month, total]) => {
-      billedSoFar += total.quantity;
+      const quantity = total.hasErpLineItems
+        ? total.quantityItems.size === 1
+          ? [...total.quantityItems.values()][0]
+          : 0
+        : total.legacyQuantity;
+      billedSoFar += quantity;
       return {
         month,
-        quantity: total.quantity,
+        quantity,
         quantityItems: [...total.quantityItems.entries()].map(([quantityType, quantity]) => ({
           quantityType,
           quantity,
         })),
-        remainingQuantity: Math.max(0, workOrder.totalQuantity - billedSoFar),
+        remainingQuantity: workOrder.lineItems?.length
+          ? workOrder.lineItems.length && new Set(workOrder.lineItems.map((item) => item.uom)).size > 1
+            ? 0
+            : Math.max(0, workOrder.totalQuantity - billedSoFar)
+          : Math.max(0, workOrder.totalQuantity - billedSoFar),
       };
     });
 }
@@ -195,6 +274,75 @@ function getMonthlyBillTotals(workOrder) {
 function formatBillingMonth(month) {
   return new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' })
     .format(new Date(`${month}-01T12:00:00`));
+}
+
+function addQuantityItems(target, items) {
+  items.forEach((item) => {
+    target.set(item.quantityType, (target.get(item.quantityType) || 0) + item.quantity);
+  });
+}
+
+function getWorkOrderKpis(workOrders, month) {
+  const issued = new Map();
+  const completed = new Map();
+  const remaining = new Map();
+  const monthly = new Map();
+  const byPlant = new Map();
+  const byCostCentre = new Map();
+  const byContractor = new Map();
+
+  workOrders.forEach((workOrder) => {
+    const issuedItems = getIssuedQuantityItems(workOrder);
+    addQuantityItems(issued, issuedItems);
+    addQuantityItems(completed, getConsumedQuantityItems(workOrder));
+    addQuantityItems(remaining, getRemainingQuantityItems(workOrder));
+    const plantKey = workOrder.plant || 'Unassigned';
+    const plantItems = byPlant.get(plantKey) || new Map();
+    addQuantityItems(plantItems, issuedItems);
+    byPlant.set(plantKey, plantItems);
+    const costCentreKey = workOrder.sourceData?.costCentre || 'Unassigned';
+    const costCentreItems = byCostCentre.get(costCentreKey) || new Map();
+    addQuantityItems(costCentreItems, issuedItems);
+    byCostCentre.set(costCentreKey, costCentreItems);
+    const contractorKey = workOrder.contractor || 'Unassigned';
+    const contractorItems = byContractor.get(contractorKey) || new Map();
+    addQuantityItems(contractorItems, issuedItems);
+    byContractor.set(contractorKey, contractorItems);
+    workOrder.bills.forEach((bill) => {
+      if (bill.month !== month || bill.approvalStatus && bill.approvalStatus !== 'approved') return;
+      if (bill.lineItems?.length) {
+        addQuantityItems(monthly, bill.lineItems.map((item) => ({
+          quantityType: item.uom,
+          quantity: item.quantity,
+        })));
+      } else {
+        addQuantityItems(monthly, bill.quantityItems || []);
+      }
+    });
+  });
+
+  const formatMap = (map) => [...map.entries()]
+    .map(([quantityType, quantity]) => ({ quantityType, quantity }));
+  const formatBreakdown = (map) => formatQuantityBreakdown(formatMap(map)) || '—';
+  return {
+    totalWorkOrders: workOrders.length,
+    issued: formatBreakdown(issued),
+    completed: formatBreakdown(completed),
+    remaining: formatBreakdown(remaining),
+    monthly: formatBreakdown(monthly),
+    byPlant: [...byPlant.entries()].map(([label, quantities]) => ({
+      label: label || 'Unassigned',
+      quantities: formatBreakdown(quantities),
+    })),
+    byCostCentre: [...byCostCentre.entries()].map(([label, quantities]) => ({
+      label: label || 'Unassigned',
+      quantities: formatBreakdown(quantities),
+    })),
+    byContractor: [...byContractor.entries()].map(([label, quantities]) => ({
+      label: label || 'Unassigned',
+      quantities: formatBreakdown(quantities),
+    })),
+  };
 }
 
 export default function WorkOrderTracker({ user }) {
@@ -208,7 +356,7 @@ export default function WorkOrderTracker({ user }) {
     workOrderId: '',
     month: getLocalDateKey().slice(0, 7),
     billNumber: '',
-    quantityItems: [{ quantityType: '', quantity: '' }],
+    quantityItems: [{ quantityType: '', quantity: '', itemCode: '' }],
   });
   const [editingBill, setEditingBill] = useState(null);
   const [savingBill, setSavingBill] = useState(false);
@@ -272,7 +420,7 @@ export default function WorkOrderTracker({ user }) {
 
   const activeWorkOrders = useMemo(
     () => workOrders.filter((workOrder) =>
-      workOrder.active && workOrder.remainingQuantity > 1e-9),
+      workOrder.active && hasRemainingQuantity(workOrder)),
     [workOrders],
   );
   const selectedWorkOrder = workOrders.find(
@@ -280,7 +428,7 @@ export default function WorkOrderTracker({ user }) {
   );
   const billWorkOrderOptions = workOrders.filter((workOrder) =>
     workOrder.active &&
-    (workOrder.remainingQuantity > 1e-9 ||
+    (hasRemainingQuantity(workOrder) ||
       (editingBill && workOrder.id === billForm.workOrderId)),
   );
   const availableQuantity = selectedWorkOrder
@@ -291,8 +439,22 @@ export default function WorkOrderTracker({ user }) {
     (total, item) => total + (Number(item.quantity) || 0),
     0,
   );
-  const billExceedsBalance = billForm.quantityItems.some((item) => item.quantity !== '') &&
-    billQuantity > availableQuantity + 1e-9;
+  const billExceedsBalance = selectedWorkOrder?.category === 'ERP Work Order'
+    ? [...new Set(billForm.quantityItems.map((item) =>
+      `${item.itemCode}|${item.quantityType}`))].some((key) => {
+      const [itemCode, uom] = key.split('|');
+      const requested = billForm.quantityItems.reduce((total, item) =>
+        item.itemCode === itemCode && item.quantityType === uom
+          ? total + (Number(item.quantity) || 0)
+          : total, 0);
+      const original = selectedWorkOrder.lineItems.find((item) =>
+        item.itemCode === itemCode && item.uom === uom);
+      const editingQuantity = editingBill?.lineItems?.reduce((total, item) =>
+        item.itemCode === itemCode && item.uom === uom ? total + item.quantity : total, 0) || 0;
+      return requested > (Number(original?.remainingQuantity || 0) + editingQuantity) + 1e-9;
+    })
+    : billForm.quantityItems.some((item) => item.quantity !== '') &&
+      billQuantity > availableQuantity + 1e-9;
   const filteredWorkOrders = useMemo(() => {
     const query = workOrderSearchQuery.trim().toLowerCase();
     return workOrders.filter((workOrder) => {
@@ -307,6 +469,18 @@ export default function WorkOrderTracker({ user }) {
       return true;
     });
   }, [workOrders, workOrderSearchQuery, plantFilter, contractorFilter, statusFilter]);
+  const kpis = useMemo(
+    () => getWorkOrderKpis(workOrders, getLocalDateKey().slice(0, 7)),
+    [workOrders],
+  );
+  const plantFilterOptions = useMemo(() => [...new Set([
+    ...WORK_ORDER_PLANTS.map((plant) => plant.value),
+    ...workOrders.map((workOrder) => workOrder.plant).filter(Boolean),
+  ])], [workOrders]);
+  const contractorFilterOptions = useMemo(() => [...new Set([
+    ...WORK_ORDER_CONTRACTORS.map((contractor) => contractor.value),
+    ...workOrders.map((workOrder) => workOrder.contractor).filter(Boolean),
+  ])], [workOrders]);
 
   function updateWorkOrderForm(field, value) {
     setWorkOrderForm((current) => ({
@@ -347,7 +521,7 @@ export default function WorkOrderTracker({ user }) {
       ...current,
       [field]: value,
       ...(field === 'workOrderId'
-        ? { quantityItems: [{ quantityType: '', quantity: '' }] }
+        ? { quantityItems: [{ quantityType: '', quantity: '', itemCode: '' }] }
         : {}),
     }));
   }
@@ -363,7 +537,7 @@ export default function WorkOrderTracker({ user }) {
   function addBillQuantity() {
     setBillForm((current) => ({
       ...current,
-      quantityItems: [...current.quantityItems, { quantityType: '', quantity: '' }],
+      quantityItems: [...current.quantityItems, { quantityType: '', quantity: '', itemCode: '' }],
     }));
   }
 
@@ -434,23 +608,52 @@ export default function WorkOrderTracker({ user }) {
       });
       return;
     }
-    if (billForm.quantityItems.some((item) => !item.quantityType || !item.quantity)) {
+    const isErpBill = selectedWorkOrder?.category === 'ERP Work Order';
+    if (billForm.quantityItems.some((item) =>
+      !item.quantityType || !item.quantity || (isErpBill && !item.itemCode))) {
       setMessage({ text: 'Choose a billed quantity type.', type: 'error' });
       return;
     }
     setSavingBill(true);
     setMessage({ text: editingBill ? 'Updating monthly bill...' : 'Saving monthly bill...', type: 'info' });
     try {
+      const lineItems = isErpBill
+        ? billForm.quantityItems.map((item, index) => {
+          const original = selectedWorkOrder.lineItems.find((lineItem) =>
+            lineItem.itemCode === item.itemCode && lineItem.uom === item.quantityType);
+          const previous = editingBill?.lineItems?.find((lineItem) =>
+            lineItem.itemCode === item.itemCode && lineItem.uom === item.quantityType);
+          return {
+            srNo: String(index + 1),
+            itemCode: item.itemCode,
+            description: previous?.description || original?.description || '',
+            uom: item.quantityType,
+            quantity: Number(item.quantity),
+            rate: previous?.rate ?? null,
+            grossAmount: previous?.grossAmount ?? null,
+          };
+        })
+        : [];
+      const quantitiesByType = new Map();
+      billForm.quantityItems.forEach((item) => {
+        quantitiesByType.set(
+          item.quantityType,
+          (quantitiesByType.get(item.quantityType) || 0) + (Number(item.quantity) || 0),
+        );
+      });
+      const quantityItems = [...quantitiesByType.entries()].map(([quantityType, quantity]) => ({
+        quantityType,
+        quantity,
+      }));
       const response = await saveMonthlyBill(user.sessionToken, {
         billId: editingBill?.id,
         workOrderId: billForm.workOrderId,
         month: billForm.month,
         billNumber: billForm.billNumber,
-        quantityItems: billForm.quantityItems,
-        quantity: billForm.quantityItems.reduce(
-          (total, item) => total + (Number(item.quantity) || 0),
-          0,
-        ),
+        quantityItems,
+        quantity: quantityItems.length === 1 ? quantityItems[0].quantity : 0,
+        sourceData: editingBill?.sourceData || {},
+        lineItems,
         document: null,
       });
       if (!response || response.saved !== true || typeof response.id !== 'string') {
@@ -460,7 +663,7 @@ export default function WorkOrderTracker({ user }) {
         workOrderId: '',
         month: getLocalDateKey().slice(0, 7),
         billNumber: '',
-        quantityItems: [{ quantityType: '', quantity: '' }],
+        quantityItems: [{ quantityType: '', quantity: '', itemCode: '' }],
       });
       setEditingBill(null);
       setMessage({
@@ -484,9 +687,15 @@ export default function WorkOrderTracker({ user }) {
       workOrderId: workOrder.id,
       month: bill.month,
       billNumber: bill.billNumber,
-      quantityItems: bill.quantityItems?.length
+      quantityItems: bill.lineItems?.length
+        ? bill.lineItems.map((item) => ({
+          itemCode: item.itemCode,
+          quantityType: item.uom,
+          quantity: String(item.quantity),
+        }))
+        : bill.quantityItems?.length
         ? bill.quantityItems.map((item) => ({ ...item, quantity: String(item.quantity) }))
-        : [{ quantityType: '', quantity: String(bill.quantity) }],
+        : [{ quantityType: '', quantity: String(bill.quantity), itemCode: '' }],
     });
     setExpandedWorkOrderId(workOrder.id);
     setMessage({ text: '', type: 'info' });
@@ -498,7 +707,7 @@ export default function WorkOrderTracker({ user }) {
       workOrderId: '',
       month: getLocalDateKey().slice(0, 7),
       billNumber: '',
-      quantityItems: [{ quantityType: '', quantity: '' }],
+      quantityItems: [{ quantityType: '', quantity: '', itemCode: '' }],
     });
     setMessage({ text: '', type: 'info' });
   }
@@ -506,7 +715,7 @@ export default function WorkOrderTracker({ user }) {
   async function changeWorkOrderStatus(workOrder) {
     if (user.role !== 'admin') return;
     const nextStatus = workOrder.active ? 'inactive' : 'active';
-    if (nextStatus === 'active' && workOrder.remainingQuantity <= 1e-9) {
+    if (nextStatus === 'active' && !hasRemainingQuantity(workOrder)) {
       setMessage({
         text: 'Completed work orders remain inactive until the billed quantity is corrected.',
         type: 'error',
@@ -639,11 +848,47 @@ export default function WorkOrderTracker({ user }) {
           Track contract quantities and monthly bills. Remaining balances are calculated from the
           saved bill ledger; bills cannot exceed the available work order quantity.
         </p>
+        <div className="work-order-kpi-grid" aria-label="Work order quantity summary">
+          {[
+            ['Total Work Orders', String(kpis.totalWorkOrders)],
+            ['Issued Quantity', kpis.issued],
+            ['Completed Quantity', kpis.completed],
+            ['Remaining Quantity', kpis.remaining],
+            ['Monthly Completed', kpis.monthly],
+          ].map(([label, value]) => (
+            <div className="work-order-kpi" key={label}>
+              <span>{label}</span>
+              <strong>{value}</strong>
+            </div>
+          ))}
+        </div>
+        <div className="work-order-breakdowns">
+          <section>
+            <h4>Division-wise issued quantities</h4>
+            {kpis.byPlant.length
+              ? <ul>{kpis.byPlant.map((item) => <li key={item.label}><strong>{item.label}</strong><span>{item.quantities}</span></li>)}</ul>
+              : <p>No work order quantities yet.</p>}
+          </section>
+          <section>
+            <h4>Cost Centre-wise issued quantities</h4>
+            {kpis.byCostCentre.length
+              ? <ul>{kpis.byCostCentre.map((item) => <li key={item.label}><strong>{item.label}</strong><span>{item.quantities}</span></li>)}</ul>
+              : <p>No work order quantities yet.</p>}
+          </section>
+          <section>
+            <h4>Contractor-wise issued quantities</h4>
+            {kpis.byContractor.length
+              ? <ul>{kpis.byContractor.map((item) => <li key={item.label}><strong>{item.label}</strong><span>{item.quantities}</span></li>)}</ul>
+              : <p>No work order quantities yet.</p>}
+          </section>
+        </div>
         {message.text && (
           <p className={`admin-msg message-${message.type}`} role="status" aria-live="polite">
             {message.text}
           </p>
         )}
+
+        <DocumentIntake user={user} workOrders={workOrders} onSaved={reloadLedger} />
 
         <form className="document-upload-form work-order-form" onSubmit={submitWorkOrder}>
           <h3>Add Work Order</h3>
@@ -665,7 +910,7 @@ export default function WorkOrderTracker({ user }) {
             disabled={savingWorkOrder}
             onChange={(event) => updateWorkOrderForm('category', event.target.value)}
           >
-            {WORK_ORDER_CATEGORIES.map((category) => (
+            {MANUAL_WORK_ORDER_CATEGORIES.map((category) => (
               <option key={category} value={category}>{category}</option>
             ))}
           </select>
@@ -680,8 +925,8 @@ export default function WorkOrderTracker({ user }) {
                 onChange={(event) => updateWorkOrderForm('plant', event.target.value)}
               >
                 <option value="">Choose plant</option>
-                {WORK_ORDER_PLANTS.map((plant) => (
-                  <option key={plant.value} value={plant.value}>{plant.label}</option>
+                {plantFilterOptions.map((plant) => (
+                  <option key={plant} value={plant}>{getPlantLabel(plant)}</option>
                 ))}
               </select>
             </div>
@@ -695,8 +940,8 @@ export default function WorkOrderTracker({ user }) {
                 onChange={(event) => updateWorkOrderForm('contractor', event.target.value)}
               >
                 <option value="">Choose contractor</option>
-                {WORK_ORDER_CONTRACTORS.map((contractor) => (
-                  <option key={contractor.value} value={contractor.value}>{contractor.label}</option>
+                {contractorFilterOptions.map((contractor) => (
+                  <option key={contractor} value={contractor}>{getContractorLabel(contractor)}</option>
                 ))}
               </select>
             </div>
@@ -798,8 +1043,8 @@ export default function WorkOrderTracker({ user }) {
               onChange={(event) => setPlantFilter(event.target.value)}
             >
               <option value="all">All plants</option>
-              {WORK_ORDER_PLANTS.map((plant) => (
-                <option key={plant.value} value={plant.value}>{plant.label}</option>
+              {plantFilterOptions.map((plant) => (
+                <option key={plant} value={plant}>{getPlantLabel(plant)}</option>
               ))}
             </select>
           </div>
@@ -811,8 +1056,8 @@ export default function WorkOrderTracker({ user }) {
               onChange={(event) => setContractorFilter(event.target.value)}
             >
               <option value="all">All contractors</option>
-              {WORK_ORDER_CONTRACTORS.map((contractor) => (
-                <option key={contractor.value} value={contractor.value}>{contractor.label}</option>
+              {contractorFilterOptions.map((contractor) => (
+                <option key={contractor} value={contractor}>{getContractorLabel(contractor)}</option>
               ))}
             </select>
           </div>
@@ -831,7 +1076,9 @@ export default function WorkOrderTracker({ user }) {
             <option value="">Choose an active work order</option>
             {billWorkOrderOptions.map((workOrder) => (
               <option key={workOrder.id} value={workOrder.id}>
-                {workOrder.number} — {getPlantLabel(workOrder.plant)} — {getContractorLabel(workOrder.contractor)} — {formatQuantity(workOrder.remainingQuantity)} remaining
+                {workOrder.number} — {getPlantLabel(workOrder.plant)} — {getContractorLabel(workOrder.contractor)} — {workOrder.lineItems?.length
+                  ? formatQuantityBreakdown(getRemainingQuantityItems(workOrder))
+                  : formatQuantity(workOrder.remainingQuantity)} remaining
               </option>
             ))}
           </select>
@@ -863,7 +1110,30 @@ export default function WorkOrderTracker({ user }) {
           <div className="work-order-quantity-list">
             <label>Separate billed quantities:</label>
             {billForm.quantityItems.map((item, index) => (
-              <div className="work-order-quantity-row" key={index}>
+                <div
+                  className={`work-order-quantity-row ${selectedWorkOrder?.category === 'ERP Work Order' ? 'work-order-quantity-row-erp' : ''}`}
+                  key={index}
+                >
+                  {selectedWorkOrder?.category === 'ERP Work Order' && (
+                    <select
+                      aria-label={`Billed item code ${index + 1}`}
+                      value={item.itemCode || ''}
+                      disabled={savingBill}
+                      onChange={(event) => {
+                        const itemCode = event.target.value;
+                        const lineItem = selectedWorkOrder.lineItems.find((candidate) =>
+                          candidate.itemCode === itemCode);
+                        updateBillQuantity(index, 'itemCode', itemCode);
+                        if (lineItem) updateBillQuantity(index, 'quantityType', lineItem.uom);
+                      }}
+                    >
+                      <option value="">Choose item code</option>
+                      {[...new Set(selectedWorkOrder.lineItems.map((lineItem) => lineItem.itemCode))]
+                        .map((itemCode) => (
+                          <option key={itemCode} value={itemCode}>{itemCode}</option>
+                        ))}
+                    </select>
+                  )}
                 <select
                   aria-label={`Billed quantity type ${index + 1}`}
                   required
@@ -873,7 +1143,7 @@ export default function WorkOrderTracker({ user }) {
                 >
                   <option value="">Choose billed quantity type</option>
                   {selectedWorkOrder &&
-                    getQuantityTypes(selectedWorkOrder.category).map((quantityType) => (
+                    getQuantityTypes(selectedWorkOrder.category, selectedWorkOrder).map((quantityType) => (
                       <option key={quantityType} value={quantityType}>{quantityType}</option>
                     ))}
                 </select>
@@ -900,7 +1170,9 @@ export default function WorkOrderTracker({ user }) {
             </button>
           </div>
           <p className={`work-order-availability ${billExceedsBalance ? 'message-error' : ''}`}>
-            Available to bill: {formatQuantity(availableQuantity)}
+            Available to bill: {selectedWorkOrder?.category === 'ERP Work Order'
+              ? formatQuantityBreakdown(getRemainingQuantityItems(selectedWorkOrder))
+              : formatQuantity(availableQuantity)}
           </p>
           {billExceedsBalance && (
             <p className="admin-msg message-error" role="alert">
@@ -1225,6 +1497,8 @@ function FragmentRows({
   const monthlyTotals = getMonthlyBillTotals(workOrder);
   const consumedQuantityItems = getConsumedQuantityItems(workOrder);
   const remainingQuantityItems = getRemainingQuantityItems(workOrder);
+  const issuedQuantityItems = getIssuedQuantityItems(workOrder);
+  const workOrderData = workOrder.sourceData || {};
 
   return (
     <>
@@ -1244,8 +1518,10 @@ function FragmentRows({
         <td>{getPlantLabel(workOrder.plant)}</td>
         <td>{getContractorLabel(workOrder.contractor)}</td>
         <td>
-          <strong>{formatQuantity(workOrder.totalQuantity)}</strong>
-          {workOrder.quantityItems?.length > 0 && (
+          <strong>{workOrder.lineItems?.length
+            ? formatQuantityBreakdown(issuedQuantityItems)
+            : formatQuantity(workOrder.totalQuantity)}</strong>
+          {!workOrder.lineItems?.length && workOrder.quantityItems?.length > 0 && (
             <small>{formatQuantityBreakdown(workOrder.quantityItems)}</small>
           )}
         </td>
@@ -1257,7 +1533,9 @@ function FragmentRows({
               {monthlyTotals.map((monthlyTotal) => (
                 <div className="work-order-monthly-item" key={monthlyTotal.month}>
                   <span>{formatBillingMonth(monthlyTotal.month)}</span>
-                  <strong>{formatQuantity(monthlyTotal.quantity)}</strong>
+                  <strong>{monthlyTotal.quantity > 0
+                    ? formatQuantity(monthlyTotal.quantity)
+                    : 'Various units'}</strong>
                   {monthlyTotal.quantityItems.length > 0 && (
                     <small>{formatQuantityBreakdown(monthlyTotal.quantityItems)}</small>
                   )}
@@ -1267,14 +1545,18 @@ function FragmentRows({
           )}
         </td>
         <td>
-          <strong>{formatQuantity(workOrder.consumedQuantity)}</strong>
-          {consumedQuantityItems.length > 0 && (
+          <strong>{workOrder.lineItems?.length
+            ? formatQuantityBreakdown(consumedQuantityItems) || '0'
+            : formatQuantity(workOrder.consumedQuantity)}</strong>
+          {!workOrder.lineItems?.length && consumedQuantityItems.length > 0 && (
             <small>{formatQuantityBreakdown(consumedQuantityItems)}</small>
           )}
         </td>
         <td>
-          <strong>{formatQuantity(workOrder.remainingQuantity)}</strong>
-          {remainingQuantityItems.length > 0 && (
+          <strong>{workOrder.lineItems?.length
+            ? formatQuantityBreakdown(remainingQuantityItems) || '0'
+            : formatQuantity(workOrder.remainingQuantity)}</strong>
+          {!workOrder.lineItems?.length && remainingQuantityItems.length > 0 && (
             <small>{formatQuantityBreakdown(remainingQuantityItems)}</small>
           )}
         </td>
@@ -1287,7 +1569,7 @@ function FragmentRows({
               className="secondary-btn"
               type="button"
               onClick={() => onChangeStatus(workOrder)}
-              disabled={workOrder.remainingQuantity <= 1e-9 && workOrder.active}
+              disabled={!hasRemainingQuantity(workOrder) && workOrder.active}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 {workOrder.active ? (
@@ -1319,7 +1601,9 @@ function FragmentRows({
                 <div>
                   <strong>Monthly bill history</strong>
                   <span>
-                    {workOrder.startDate ? `Started ${workOrder.startDate}` : 'Start date not set'}
+                    {workOrder.startDate
+                      ? `Started ${formatDocumentDate(workOrder.startDate)}`
+                      : 'Start date not set'}
                     {workOrder.durationMonths ? ` · ${workOrder.durationMonths} months` : ''}
                   </span>
                 </div>
@@ -1352,7 +1636,9 @@ function FragmentRows({
                           <tr key={monthlyTotal.month}>
                             <td>{formatBillingMonth(monthlyTotal.month)}</td>
                             <td>
-                              {formatQuantity(monthlyTotal.quantity)}
+                              {monthlyTotal.quantity > 0
+                                ? formatQuantity(monthlyTotal.quantity)
+                                : 'Various units'}
                               {monthlyTotal.quantityItems.length > 0 && (
                                 <small>{formatQuantityBreakdown(monthlyTotal.quantityItems)}</small>
                               )}
@@ -1377,10 +1663,29 @@ function FragmentRows({
                         {workOrder.bills.map((bill) => (
                           <tr key={bill.id}>
                             <td>{formatBillingMonth(bill.month)}</td>
-                            <td>{bill.billNumber}</td>
                             <td>
-                              {formatQuantity(bill.quantity)}
-                              {bill.quantityItems?.length > 0 && (
+                              {bill.billNumber}
+                              {bill.sourceData?.documentNumber && (
+                                <small>Voucher: {bill.sourceData.documentNumber}</small>
+                              )}
+                              {bill.sourceData?.billDate && (
+                                <small>Bill date: {formatDocumentDate(bill.sourceData.billDate)}</small>
+                              )}
+                              {bill.sourceData?.voucherDate && (
+                                <small>Voucher date: {formatDocumentDate(bill.sourceData.voucherDate)}</small>
+                              )}
+                            </td>
+                            <td>
+                              {bill.lineItems?.length
+                                ? formatQuantityBreakdown(getLineItemQuantityTotals(bill.lineItems))
+                                : formatQuantity(bill.quantity)}
+                              {bill.lineItems?.length > 0 && (
+                                <small>{bill.lineItems.map((item) =>
+                                  `${item.srNo ? `${item.srNo}. ` : ''}${item.itemCode}: ${formatQuantity(item.quantity)} ${item.uom}` +
+                                  `${item.rate === null ? '' : ` @ ${item.rate}`}` +
+                                  `${item.grossAmount === null ? '' : ` / ${item.grossAmount}`}`).join(' | ')}</small>
+                              )}
+                              {!bill.lineItems?.length && bill.quantityItems?.length > 0 && (
                                 <span>
                                   {' — '}
                                   {bill.quantityItems.map((item) =>
@@ -1412,6 +1717,61 @@ function FragmentRows({
                     </table>
                   </div>
                 </>
+              )}
+              {workOrder.lineItems?.length > 0 && (
+                <div className="table-scroll work-order-item-progress">
+                  <table className="work-order-bill-table">
+                    <thead>
+                      <tr>
+                        <th>Sr No</th><th>Item Code</th><th>Description</th><th>UOM</th>
+                        <th>Original Issued</th><th>Approved Completed</th><th>Remaining</th>
+                        <th>Rate</th><th>Gross</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {workOrder.lineItems.map((item, index) => (
+                        <tr key={`${item.itemCode}-${item.uom}-${index}`}>
+                          <td>{item.srNo}</td>
+                          <td>{item.itemCode}</td>
+                          <td>{item.description}</td>
+                          <td>{item.uom}</td>
+                          <td>{formatQuantity(item.quantity)}</td>
+                          <td>{formatQuantity(item.completedQuantity || 0)}</td>
+                          <td>{formatQuantity(item.remainingQuantity || 0)}</td>
+                          <td>{item.rate ?? '—'}</td>
+                          <td>{item.grossAmount ?? '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {(workOrderData.division || workOrderData.department ||
+                workOrderData.costCentre || workOrderData.contractorName ||
+                workOrderData.vendorCode || workOrderData.pan || workOrderData.gstin ||
+                workOrderData.subject || workOrderData.scheduleTo) && (
+                <dl className="work-order-source-details">
+                  {[
+                    ['Division', workOrderData.division],
+                    ['Department', workOrderData.department],
+                    ['Cost Centre', workOrderData.costCentre],
+                    ['Contractor', workOrderData.contractorName],
+                    ['Contractor Address', workOrderData.contractorAddress],
+                    ['Vendor Code', workOrderData.vendorCode],
+                    ['PAN', workOrderData.pan],
+                    ['GSTIN', workOrderData.gstin],
+                    ['Subject', workOrderData.subject],
+                    ['Issue Date', formatDocumentDate(workOrderData.issueDate)],
+                    ['Voucher Date', formatDocumentDate(workOrderData.voucherDate)],
+                    ['Commencement', formatDocumentDate(workOrderData.scheduleFrom)],
+                    ['Completion', formatDocumentDate(workOrderData.scheduleTo)],
+                    ['Gross', workOrderData.grossAmount],
+                    ['Taxable Value', workOrderData.taxableValue],
+                    ['Net Amount', workOrderData.netAmount],
+                  ].filter(([, value]) => value).map(([label, value]) => (
+                    <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
+                  ))}
+                </dl>
               )}
             </div>
           </td>

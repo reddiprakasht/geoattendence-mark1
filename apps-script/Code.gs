@@ -6,12 +6,14 @@ const WORK_ORDER_HEADERS = [
   'ID', 'Work Order Number', 'Category', 'Total Allotted Quantity', 'Start Date',
   'Duration Months', 'Document ID', 'Document Name', 'Document MIME Type', 'Created At',
   'Plant', 'Contractor', 'Status', 'Quantity Breakdown',
+  'Source Data', 'Line Items',
 ];
 const MONTHLY_BILL_HEADERS = [
   'ID', 'Work Order ID', 'Billing Month', 'Bill Number', 'Billed Quantity',
   'Document ID', 'Document Name', 'Document MIME Type', 'Created At', 'Updated At', 'Quantity Breakdown',
+  'Source Data', 'Line Items', 'Approval Status',
 ];
-const WORK_ORDER_CATEGORIES = ['Manpower', 'Online Steam Leakage'];
+const WORK_ORDER_CATEGORIES = ['Manpower', 'Online Steam Leakage', 'ERP Work Order'];
 const MANPOWER_QUANTITY_TYPES = ['Fitter', 'Kalasi'];
 const STEAM_LINE_QUANTITY_TYPES = ['2 Inch', '4 Inch', '6 Inch', '8 Inch', '10 Inch'];
 const SESSION_TTL_SECONDS = 21600;
@@ -46,8 +48,18 @@ function doPost(event) {
   try {
     payload = JSON.parse(event.parameter.payload || '{}');
     const result = handleRequest_(payload);
+    if (payload.action === 'getDocumentForExtraction' && payload.responseMode === 'json') {
+      return ContentService.createTextOutput(JSON.stringify({ ok: true, result: result }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
     return responsePage_(payload.nonce, { ok: true, result: result });
   } catch (error) {
+    if (payload.action === 'getDocumentForExtraction' && payload.responseMode === 'json') {
+      return ContentService.createTextOutput(JSON.stringify({
+        ok: false,
+        error: error instanceof Error ? error.message : 'The request could not be completed.',
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
     return responsePage_(payload.nonce, {
       ok: false,
       error: error instanceof Error ? error.message : 'The request could not be completed.',
@@ -153,6 +165,16 @@ function handleRequest_(payload) {
     if (session.role !== 'admin') throw new Error('Only administrators can upload documents.');
     assertActiveAdmin_(session);
     return uploadDocument_(payload);
+  }
+  if (payload.action === 'uploadExtractionDocument') {
+    if (session.role !== 'admin') throw new Error('Only administrators can upload documents.');
+    assertActiveAdmin_(session);
+    return uploadExtractionDocument_(payload);
+  }
+  if (payload.action === 'getDocumentForExtraction') {
+    if (session.role !== 'admin') throw new Error('Only administrators can analyze documents.');
+    assertActiveAdmin_(session);
+    return getDocumentForExtraction_(payload.fileId);
   }
   if (payload.action === 'assignDocument') {
     if (session.role !== 'admin') throw new Error('Only administrators can organize documents.');
@@ -354,6 +376,44 @@ function uploadDocument_(payload) {
   };
 }
 
+function uploadExtractionDocument_(payload) {
+  const month = validateDocumentMonth_(payload.month);
+  const name = typeof payload.name === 'string' ? payload.name.trim() : '';
+  const mimeType = payload.mimeType;
+  const encoded = payload.base64;
+  if (!name || name.length > 180 || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw new Error('Choose a valid file name (up to 180 characters).');
+  }
+  if (['image/jpeg', 'image/png', 'application/pdf'].indexOf(mimeType) < 0) {
+    throw new Error('Upload a JPG, JPEG, PNG, or PDF file.');
+  }
+  if (typeof encoded !== 'string' || !encoded ||
+      encoded.length > 4 * Math.ceil(MAX_DOCUMENT_BYTES / 3)) {
+    throw new Error('Each document must be 8 MB or smaller.');
+  }
+
+  let bytes;
+  try {
+    bytes = Utilities.base64Decode(encoded);
+  } catch (error) {
+    throw new Error('The selected document could not be read. Choose it again and retry.');
+  }
+  if (!bytes.length || bytes.length > MAX_DOCUMENT_BYTES ||
+      !matchesDocumentSignature_(bytes, mimeType)) {
+    throw new Error('The file contents do not match a supported image or PDF type.');
+  }
+
+  const folder = getMonthFolder_(getDocumentsFolder_(), month, true);
+  const file = folder.createFile(Utilities.newBlob(bytes, mimeType, name));
+  file.setDescription('geoattendance-category:work-order');
+  return {
+    id: file.getId(),
+    name: file.getName(),
+    mimeType: file.getMimeType(),
+    month: month,
+  };
+}
+
 function parseDocumentMetadata_(description) {
   const value = typeof description === 'string' ? description : '';
   const match = value.match(
@@ -448,6 +508,14 @@ function getDocument_(fileId) {
     }
   }
   throw new Error('That document could not be found.');
+}
+
+function getDocumentForExtraction_(fileId) {
+  const document = getDocument_(fileId);
+  if (['image/jpeg', 'image/png', 'application/pdf'].indexOf(document.mimeType) < 0) {
+    throw new Error('Upload a JPG, JPEG, PNG, or PDF file for extraction.');
+  }
+  return document;
 }
 
 function deleteDocument_(payload) {
@@ -558,7 +626,7 @@ function getLedgerSheet_(spreadsheet, name, headers) {
         return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) ===
           normalizeHeader_(header);
       })) {
-    sheet.getRange(1, 11, 1, 3).setValues([headers.slice(10)]);
+    sheet.getRange(1, 11, 1, 3).setValues([headers.slice(10, 13)]);
   }
   if (name === WORK_ORDERS_SHEET &&
       sheet.getLastColumn() === 12 &&
@@ -581,6 +649,14 @@ function getLedgerSheet_(spreadsheet, name, headers) {
       normalizeHeader_(sheet.getRange(1, 14).getDisplayValue()) === 'quantity type') {
     sheet.getRange(1, 14).setValue(headers[13]);
   }
+  if (name === WORK_ORDERS_SHEET &&
+      sheet.getLastColumn() === 14 &&
+      headers.slice(0, 14).every(function (header, index) {
+        return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) ===
+          normalizeHeader_(header);
+      })) {
+    sheet.getRange(1, 15, 1, 2).setValues([headers.slice(14)]);
+  }
   if (name === MONTHLY_BILLS_SHEET &&
       sheet.getLastColumn() === 10 &&
       headers.slice(0, 10).every(function (header, index) {
@@ -593,6 +669,14 @@ function getLedgerSheet_(spreadsheet, name, headers) {
       sheet.getLastColumn() === 11 &&
       normalizeHeader_(sheet.getRange(1, 11).getDisplayValue()) === 'quantity type') {
     sheet.getRange(1, 11).setValue(headers[10]);
+  }
+  if (name === MONTHLY_BILLS_SHEET &&
+      sheet.getLastColumn() === 11 &&
+      headers.slice(0, 11).every(function (header, index) {
+        return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) ===
+          normalizeHeader_(header);
+      })) {
+    sheet.getRange(1, 12, 1, 3).setValues([headers.slice(11)]);
   }
   if (headers.some(function (header, index) {
     return normalizeHeader_(sheet.getRange(1, index + 1).getDisplayValue()) !==
@@ -628,10 +712,11 @@ function ledgerDocument_(values, idIndex, nameIndex, mimeTypeIndex) {
   return { id: id, name: name, mimeType: mimeType };
 }
 
-function readLedgerQuantity_(value, fieldName) {
+function readLedgerQuantity_(value, fieldName, allowZero) {
   const quantity = Number(value);
-  if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 1000000000000) {
-    throw new Error('A saved ' + fieldName + ' must be a positive number.');
+  if (!Number.isFinite(quantity) || quantity < (allowZero ? 0 : Number.MIN_VALUE) ||
+      quantity > 1000000000000) {
+    throw new Error('A saved ' + fieldName + ' must be a valid positive number.');
   }
   return quantity;
 }
@@ -652,7 +737,11 @@ function parseQuantityItems_(value, category, fieldName) {
       : MANPOWER_QUANTITY_TYPES.concat(STEAM_LINE_QUANTITY_TYPES);
   const seen = {};
   items.forEach(function (item) {
-    if (!item || validTypes.indexOf(item.quantityType) < 0 ||
+    const typeIsValid = item && ((category === 'ERP Work Order' || !category)
+      ? typeof item.quantityType === 'string' && item.quantityType.trim().length > 0 &&
+        item.quantityType.trim().length <= 40
+      : validTypes.indexOf(item.quantityType) >= 0);
+    if (!item || !typeIsValid ||
         !Number.isFinite(Number(item.quantity)) || Number(item.quantity) <= 0) {
       throw new Error('A saved ' + fieldName + ' has invalid quantity details.');
     }
@@ -666,24 +755,116 @@ function parseQuantityItems_(value, category, fieldName) {
   });
 }
 
+function parseLedgerJson_(value, fieldName, fallback) {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(String(value));
+  } catch (error) {
+    throw new Error('A saved ' + fieldName + ' has invalid details.');
+  }
+}
+
+function readLedgerLineItems_(value, fieldName) {
+  const items = parseLedgerJson_(value, fieldName, []);
+  if (!Array.isArray(items)) {
+    throw new Error('A saved ' + fieldName + ' has invalid details.');
+  }
+  return items.length ? validateLedgerLineItems_(items, fieldName) : [];
+}
+
+function validateLedgerLineItems_(items, fieldName) {
+  if (!Array.isArray(items) || items.length < 1 || items.length > 100) {
+    throw new Error('Enter between 1 and 100 ' + fieldName + '.');
+  }
+  const validatedItems = items.map(function (item) {
+    const srNo = String(item && item.srNo || '').trim();
+    const itemCode = String(item && item.itemCode || '').trim();
+    const description = String(item && item.description || '').trim();
+    const uom = String(item && item.uom || '').trim();
+    const quantity = Number(item && item.quantity);
+    const rate = item && item.rate !== '' && item.rate !== null &&
+      item.rate !== undefined ? Number(item.rate) : null;
+    const grossAmount = item && item.grossAmount !== '' &&
+      item.grossAmount !== null && item.grossAmount !== undefined
+      ? Number(item.grossAmount)
+      : null;
+    if (srNo.length > 30 || !itemCode || itemCode.length > 100 ||
+        description.length > 500 || !uom || uom.length > 40 ||
+        !Number.isFinite(quantity) || quantity <= 0 || quantity > 1000000000000 ||
+        (rate !== null && (!Number.isFinite(rate) || rate < 0 || rate > 1000000000000)) ||
+        (grossAmount !== null &&
+          (!Number.isFinite(grossAmount) || grossAmount < 0 || grossAmount > 1000000000000))) {
+      throw new Error('A ' + fieldName + ' row has invalid item details or quantity.');
+    }
+    return {
+      srNo: srNo,
+      itemCode: itemCode,
+      description: description,
+      uom: uom,
+      quantity: quantity,
+      rate: rate,
+      grossAmount: grossAmount,
+    };
+  });
+  if (JSON.stringify(validatedItems).length > 45000) {
+    throw new Error('The ' + fieldName + ' exceed the spreadsheet cell size limit.');
+  }
+  return validatedItems;
+}
+
+function validateSourceData_(sourceData) {
+  if (sourceData === null || sourceData === undefined) return {};
+  if (!sourceData || typeof sourceData !== 'object' || Array.isArray(sourceData) ||
+      JSON.stringify(sourceData).length > 30000) {
+    throw new Error('The extracted document details are invalid or too large.');
+  }
+  return sourceData;
+}
+
+function quantityByUom_(items) {
+  const totals = {};
+  (items || []).forEach(function (item) {
+    totals[item.uom] = (totals[item.uom] || 0) + item.quantity;
+  });
+  return totals;
+}
+
 function listWorkOrders_() {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
     const sheets = getWorkOrderSheets_();
+    const erpWorkOrderIds = new Set(readLedgerRows_(sheets.workOrders)
+      .filter(function (row) {
+        return String(row.values[2] || '') === 'ERP Work Order';
+      })
+      .map(function (row) {
+        return String(row.values[0] || '');
+      }));
     const billsByWorkOrder = {};
     readLedgerRows_(sheets.bills).forEach(function (row) {
       const values = row.values;
+      const approvalStatus = String(values[13] || 'approved').trim().toLowerCase();
+      if (['approved', 'pending', 'rejected'].indexOf(approvalStatus) < 0) {
+        throw new Error('A saved monthly bill has an invalid approval status.');
+      }
       const bill = {
         id: String(values[0] || ''),
         workOrderId: String(values[1] || ''),
         month: String(values[2] || ''),
         billNumber: String(values[3] || ''),
-        quantity: readLedgerQuantity_(values[4], 'billed quantity'),
+        quantity: readLedgerQuantity_(
+          values[4],
+          'billed quantity',
+          erpWorkOrderIds.has(String(values[1] || '')),
+        ),
         document: ledgerDocument_(values, 5, 6, 7),
         createdAt: String(values[8] || ''),
         updatedAt: String(values[9] || ''),
         quantityItems: parseQuantityItems_(values[10], '', 'billed quantity'),
+        sourceData: parseLedgerJson_(values[11], 'monthly bill source data', {}),
+        lineItems: readLedgerLineItems_(values[12], 'monthly bill line items'),
+        approvalStatus: approvalStatus,
       };
       if (!/^[a-f0-9]{32}$/i.test(bill.id) ||
           !/^[a-f0-9]{32}$/i.test(bill.workOrderId) ||
@@ -697,11 +878,18 @@ function listWorkOrders_() {
 
     const workOrders = readLedgerRows_(sheets.workOrders).map(function (row) {
       const values = row.values;
+      const category = String(values[2] || '');
+      const sourceData = parseLedgerJson_(values[14], 'work order source data', {});
+      const lineItems = readLedgerLineItems_(values[15], 'work order line items');
       const workOrder = {
         id: String(values[0] || ''),
         number: String(values[1] || ''),
-        category: String(values[2] || ''),
-        totalQuantity: readLedgerQuantity_(values[3], 'allotted quantity'),
+        category: category,
+        totalQuantity: readLedgerQuantity_(
+          values[3],
+          'allotted quantity',
+          category === 'ERP Work Order',
+        ),
         startDate: String(values[4] || ''),
         durationMonths: values[5] === '' || values[5] === null ? null : Number(values[5]),
         document: ledgerDocument_(values, 6, 7, 8),
@@ -709,24 +897,67 @@ function listWorkOrders_() {
         plant: String(values[10] || ''),
         contractor: String(values[11] || ''),
         active: String(values[12] || '').trim().toLowerCase() !== 'inactive',
-        quantityItems: parseQuantityItems_(values[13], String(values[2] || ''), 'allotted quantity'),
+        quantityItems: parseQuantityItems_(values[13], category, 'allotted quantity'),
+        sourceData: sourceData,
+        lineItems: lineItems,
         bills: billsByWorkOrder[String(values[0] || '')] || [],
       };
       if (!/^[a-f0-9]{32}$/i.test(workOrder.id) ||
           !workOrder.number ||
           WORK_ORDER_CATEGORIES.indexOf(workOrder.category) < 0 ||
-          (workOrder.plant && DOCUMENT_PLANTS.indexOf(workOrder.plant) < 0) ||
-          (workOrder.contractor && DOCUMENT_CONTRACTORS.indexOf(workOrder.contractor) < 0) ||
+          workOrder.plant.length > 150 ||
+          workOrder.contractor.length > 200 ||
           (workOrder.startDate && !/^\d{4}-\d{2}-\d{2}$/.test(workOrder.startDate)) ||
           (workOrder.durationMonths !== null &&
             (!Number.isInteger(workOrder.durationMonths) || workOrder.durationMonths < 1))) {
         throw new Error('A saved work order has invalid details.');
       }
-      workOrder.consumedQuantity = workOrder.bills.reduce(function (total, bill) {
-        return total + bill.quantity;
-      }, 0);
-      workOrder.remainingQuantity = Math.max(0, workOrder.totalQuantity - workOrder.consumedQuantity);
-      if (workOrder.remainingQuantity <= 1e-9) workOrder.active = false;
+      const approvedBills = workOrder.bills.filter(function (bill) {
+        return bill.approvalStatus === 'approved';
+      });
+      if (workOrder.lineItems.length) {
+        const approvedLineItems = approvedBills.reduce(function (allItems, bill) {
+          return allItems.concat(bill.lineItems);
+        }, []);
+        workOrder.lineItems = workOrder.lineItems.map(function (item) {
+          const completedQuantity = approvedLineItems.reduce(function (total, billedItem) {
+            return total + (
+              normalizedKey_(billedItem.itemCode) === normalizedKey_(item.itemCode) &&
+              normalizedKey_(billedItem.uom) === normalizedKey_(item.uom)
+                ? billedItem.quantity
+                : 0
+            );
+          }, 0);
+          return Object.assign({}, item, {
+            completedQuantity: completedQuantity,
+            remainingQuantity: Math.max(0, item.quantity - completedQuantity),
+          });
+        });
+        const uomCount = Object.keys(quantityByUom_(workOrder.lineItems)).length;
+        workOrder.consumedQuantity = uomCount === 1
+          ? approvedLineItems.reduce(function (total, item) {
+            return total + (
+              normalizedKey_(item.uom) === normalizedKey_(workOrder.lineItems[0].uom)
+                ? item.quantity
+                : 0
+            );
+          }, 0)
+          : 0;
+        workOrder.remainingQuantity = uomCount === 1
+          ? workOrder.lineItems.reduce(function (total, item) {
+            return total + item.remainingQuantity;
+          }, 0)
+          : 0;
+        if (workOrder.lineItems.every(function (item) {
+          return item.remainingQuantity <= 1e-9;
+        })) workOrder.active = false;
+      } else {
+        workOrder.consumedQuantity = approvedBills.reduce(function (total, bill) {
+          return total + bill.quantity;
+        }, 0);
+        workOrder.remainingQuantity = Math.max(0, workOrder.totalQuantity - workOrder.consumedQuantity);
+        if (workOrder.remainingQuantity <= 1e-9) workOrder.active = false;
+      }
       return workOrder;
     });
     if (Object.keys(billsByWorkOrder).some(function (workOrderId) {
@@ -757,14 +988,18 @@ function validateSubmittedQuantityItems_(quantityItems, category) {
   }
   const validTypes = category === 'Manpower'
     ? MANPOWER_QUANTITY_TYPES
-    : STEAM_LINE_QUANTITY_TYPES;
+    : category === 'Online Steam Leakage'
+      ? STEAM_LINE_QUANTITY_TYPES
+      : [];
   const seen = {};
   return quantityItems.map(function (item) {
     const quantityType = item && typeof item.quantityType === 'string'
       ? item.quantityType.trim()
       : '';
     const quantity = Number(item && item.quantity);
-    if (validTypes.indexOf(quantityType) < 0) {
+    if (category === 'ERP Work Order'
+      ? !quantityType || quantityType.length > 40
+      : validTypes.indexOf(quantityType) < 0) {
       throw new Error('Choose a valid quantity type.');
     }
     if (seen[quantityType]) {
@@ -784,9 +1019,29 @@ function validateWorkOrderFields_(payload) {
   const plant = typeof payload.plant === 'string' ? payload.plant.trim() : '';
   const contractor = typeof payload.contractor === 'string' ? payload.contractor.trim() : '';
   const quantityItems = validateSubmittedQuantityItems_(payload.quantityItems, category);
-  const totalQuantity = quantityItems.reduce(function (total, item) {
-    return total + item.quantity;
-  }, 0);
+  const lineItems = category === 'ERP Work Order'
+    ? validateLedgerLineItems_(payload.lineItems, 'work order line items')
+    : [];
+  const quantityTotals = quantityByUom_(lineItems);
+  const totalQuantity = category === 'ERP Work Order'
+    ? Object.keys(quantityTotals).length === 1 ? quantityTotals[Object.keys(quantityTotals)[0]] : 0
+    : quantityItems.reduce(function (total, item) {
+      return total + item.quantity;
+    }, 0);
+  if (category === 'ERP Work Order') {
+    const submittedTotals = {};
+    quantityItems.forEach(function (item) {
+      submittedTotals[item.quantityType] = item.quantity;
+    });
+    if (JSON.stringify(Object.keys(submittedTotals).sort()) !==
+        JSON.stringify(Object.keys(quantityTotals).sort()) ||
+        Object.keys(quantityTotals).some(function (uom) {
+          return Math.abs(quantityTotals[uom] - submittedTotals[uom]) > 1e-9;
+        })) {
+      throw new Error('The allotted quantity breakdown does not match the work order line items.');
+    }
+  }
+  const sourceData = validateSourceData_(payload.sourceData);
   const startDate = typeof payload.startDate === 'string' ? payload.startDate.trim() : '';
   const durationMonths = payload.durationMonths === '' ||
     payload.durationMonths === null || payload.durationMonths === undefined
@@ -798,15 +1053,19 @@ function validateWorkOrderFields_(payload) {
   if (WORK_ORDER_CATEGORIES.indexOf(category) < 0) {
     throw new Error('Choose a valid category or service type.');
   }
-  if (DOCUMENT_PLANTS.indexOf(plant) < 0) {
-    throw new Error('Choose a valid plant.');
+  if (!plant || plant.length > 150) {
+    throw new Error('Enter a valid plant or division (up to 150 characters).');
   }
-  if (DOCUMENT_CONTRACTORS.indexOf(contractor) < 0) {
-    throw new Error('Choose a valid contractor.');
+  if (!contractor || contractor.length > 200) {
+    throw new Error('Enter a valid contractor (up to 200 characters).');
   }
-  if (!Number.isFinite(totalQuantity) || totalQuantity <= 0 ||
+  if ((category !== 'ERP Work Order' && totalQuantity <= 0) ||
+      !Number.isFinite(totalQuantity) ||
       totalQuantity > 1000000000000) {
     throw new Error('Enter a positive total allotted quantity.');
+  }
+  if (category === 'ERP Work Order' && lineItems.length === 0) {
+    throw new Error('Enter at least one valid ERP work order line item.');
   }
   if (startDate && !isValidLedgerDate_(startDate)) {
     throw new Error('Choose a valid work order start date.');
@@ -822,9 +1081,30 @@ function validateWorkOrderFields_(payload) {
     contractor: contractor,
     totalQuantity: totalQuantity,
     quantityItems: quantityItems,
+    lineItems: lineItems,
+    sourceData: sourceData,
     startDate: startDate,
     durationMonths: durationMonths,
   };
+}
+
+function normalizedKey_(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function contractorMatches_(firstContractor, firstData, secondContractor, secondData) {
+  const firstCode = normalizedKey_(firstData && firstData.vendorCode);
+  const secondCode = normalizedKey_(secondData && secondData.vendorCode);
+  const firstName = contractorNameKey_(firstData && firstData.contractorName) ||
+    contractorNameKey_(firstContractor);
+  const secondName = contractorNameKey_(secondData && secondData.contractorName) ||
+    contractorNameKey_(secondContractor);
+  return Boolean((firstCode && secondCode && firstCode === secondCode) ||
+    (firstName && firstName === secondName));
+}
+
+function contractorNameKey_(value) {
+  return normalizedKey_(value).replace(/[^a-z0-9]/g, '');
 }
 
 function isValidLedgerDate_(value) {
@@ -854,6 +1134,28 @@ function uploadLedgerDocument_(document, category, workType, month) {
   }
   if (DOCUMENT_MIME_TYPES.indexOf(mimeType) < 0) {
     throw new Error('Upload a JPG, PNG, WebP image, or PDF file.');
+  }
+  if (document.id) {
+    if (typeof document.id !== 'string' || !/^[a-zA-Z0-9_-]{10,}$/.test(document.id)) {
+      throw new Error('Choose a valid stored document.');
+    }
+    const documentMonthFolder = getMonthFolder_(getDocumentsFolder_(), documentMonth, false);
+    if (!documentMonthFolder) throw new Error('The uploaded document could not be found.');
+    const files = documentMonthFolder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      if (file.getId() !== document.id) continue;
+      if (file.getName() !== name || file.getMimeType() !== mimeType ||
+          file.getSize() > MAX_DOCUMENT_BYTES) {
+        throw new Error('The uploaded document details no longer match.');
+      }
+      file.setDescription(formatDocumentMetadata_({
+        category: category,
+        workType: workType,
+      }));
+      return { id: file.getId(), name: file.getName(), mimeType: file.getMimeType() };
+    }
+    throw new Error('The uploaded document could not be found in its stored month.');
   }
   if (typeof encoded !== 'string' || !encoded ||
       encoded.length > 4 * Math.ceil(MAX_DOCUMENT_BYTES / 3)) {
@@ -888,11 +1190,18 @@ function saveWorkOrder_(payload) {
   lock.waitLock(10000);
   try {
     const sheets = getWorkOrderSheets_();
-    const existingNumbers = readLedgerRows_(sheets.workOrders).map(function (row) {
-      return String(row.values[1] || '').trim().toLowerCase();
+    const duplicate = readLedgerRows_(sheets.workOrders).some(function (row) {
+      const sourceData = parseLedgerJson_(row.values[14], 'work order source data', {});
+      return normalizedKey_(row.values[1]) === normalizedKey_(fields.number) &&
+        contractorMatches_(
+          row.values[11],
+          sourceData,
+          fields.contractor,
+          fields.sourceData,
+        );
     });
-    if (existingNumbers.indexOf(fields.number.toLowerCase()) >= 0) {
-      throw new Error('That work order number already exists.');
+    if (duplicate) {
+      throw new Error('A work order with this number and contractor already exists.');
     }
     const id = Utilities.getUuid().replace(/-/g, '');
     const currentMonth = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM');
@@ -913,6 +1222,8 @@ function saveWorkOrder_(payload) {
       fields.contractor,
       'Active',
       JSON.stringify(fields.quantityItems),
+      JSON.stringify(fields.sourceData),
+      JSON.stringify(fields.lineItems),
     ]);
     return { saved: true, id: id };
   } finally {
@@ -927,6 +1238,7 @@ function saveMonthlyBill_(payload) {
     : '';
   const month = validateDocumentMonth_(payload.month);
   const billNumber = typeof payload.billNumber === 'string' ? payload.billNumber.trim() : '';
+  const sourceData = validateSourceData_(payload.sourceData);
   if (!/^[a-f0-9]{32}$/i.test(workOrderId) ||
       (billId && !/^[a-f0-9]{32}$/i.test(billId))) {
     throw new Error('Choose a valid work order and bill.');
@@ -949,29 +1261,111 @@ function saveMonthlyBill_(payload) {
     }
     const workOrderCategory = String(workOrderRow.values[2] || '');
     const quantityItems = validateSubmittedQuantityItems_(payload.quantityItems, workOrderCategory);
-    const quantity = quantityItems.reduce(function (total, item) {
-      return total + item.quantity;
-    }, 0);
-    const totalQuantity = readLedgerQuantity_(workOrderRow.values[3], 'allotted quantity');
+    const isErpWorkOrder = workOrderCategory === 'ERP Work Order';
+    const lineItems = isErpWorkOrder
+      ? validateLedgerLineItems_(payload.lineItems, 'monthly bill line items')
+      : [];
+    const billedByUom = quantityByUom_(lineItems);
+    const quantity = isErpWorkOrder
+      ? Object.keys(billedByUom).length === 1
+        ? billedByUom[Object.keys(billedByUom)[0]]
+        : 0
+      : quantityItems.reduce(function (total, item) {
+        return total + item.quantity;
+      }, 0);
+    const totalQuantity = readLedgerQuantity_(
+      workOrderRow.values[3],
+      'allotted quantity',
+      isErpWorkOrder,
+    );
     const billRows = readLedgerRows_(sheets.bills);
     const previousRow = billId ? billRows.find(function (row) {
       return String(row.values[0] || '') === billId;
     }) : null;
     if (billId && !previousRow) throw new Error('The bill to edit could not be found.');
-    const consumedByOthers = billRows.reduce(function (total, row) {
-      return total + (
+    const voucherNumber = normalizedKey_(sourceData.documentNumber);
+    const billingPeriod = normalizedKey_(sourceData.billingPeriod || month);
+    const duplicate = billRows.some(function (row) {
+      if (String(row.values[0] || '') === billId) return false;
+      const existingData = parseLedgerJson_(row.values[11], 'monthly bill source data', {});
+      const existingVoucher = normalizedKey_(existingData.documentNumber);
+      const sameBillPeriod =
         String(row.values[1] || '') === workOrderId &&
-        String(row.values[0] || '') !== billId
-          ? readLedgerQuantity_(row.values[4], 'billed quantity')
-          : 0
-      );
-    }, 0);
-    const availableQuantity = Math.max(0, totalQuantity - consumedByOthers);
-    if (quantity > availableQuantity + 1e-9) {
-      throw new Error(
-        'Billed quantity exceeds the remaining balance. Available quantity: ' +
-        availableQuantity + '.',
-      );
+        normalizedKey_(row.values[3]) === normalizedKey_(billNumber) &&
+        normalizedKey_(existingData.billingPeriod || row.values[2]) === billingPeriod;
+      return (voucherNumber && existingVoucher === voucherNumber) || sameBillPeriod;
+    });
+    if (duplicate) {
+      throw new Error('A monthly bill with this voucher number or work order, bill number, and period already exists.');
+    }
+
+    const workOrderLineItems = readLedgerLineItems_(
+      workOrderRow.values[15],
+      'work order line items',
+    );
+    const approvedPreviousBills = billRows.filter(function (row) {
+      return String(row.values[1] || '') === workOrderId &&
+        String(row.values[0] || '') !== billId &&
+        String(row.values[13] || 'approved').trim().toLowerCase() === 'approved';
+    });
+    if (isErpWorkOrder) {
+      if (!workOrderLineItems.length) {
+        throw new Error('This ERP work order has no saved item-level quantities.');
+      }
+      const remainingByItem = {};
+      workOrderLineItems.forEach(function (item) {
+        const key = normalizedKey_(item.itemCode) + '|' + normalizedKey_(item.uom);
+        remainingByItem[key] = (remainingByItem[key] || 0) + item.quantity;
+      });
+      approvedPreviousBills.forEach(function (row) {
+        const previousItems = readLedgerLineItems_(
+          row.values[12],
+          'monthly bill line items',
+        );
+        previousItems.forEach(function (item) {
+          const key = normalizedKey_(item.itemCode) + '|' + normalizedKey_(item.uom);
+          remainingByItem[key] = (remainingByItem[key] || 0) - item.quantity;
+        });
+      });
+      const billedByItem = {};
+      lineItems.forEach(function (item) {
+        const key = normalizedKey_(item.itemCode) + '|' + normalizedKey_(item.uom);
+        if (!Object.prototype.hasOwnProperty.call(remainingByItem, key)) {
+          throw new Error('A billed item code or UOM does not match the selected work order.');
+        }
+        billedByItem[key] = (billedByItem[key] || 0) + item.quantity;
+      });
+      if (Object.keys(billedByItem).some(function (key) {
+        return billedByItem[key] > remainingByItem[key] + 1e-9;
+      })) {
+        throw new Error('A billed item quantity exceeds the remaining work order quantity.');
+      }
+      const expectedByUom = {};
+      quantityItems.forEach(function (item) {
+        expectedByUom[item.quantityType] = item.quantity;
+      });
+      const actualByUom = {};
+      lineItems.forEach(function (item) {
+        actualByUom[item.uom] = (actualByUom[item.uom] || 0) + item.quantity;
+      });
+      if (JSON.stringify(Object.keys(expectedByUom).sort()) !==
+          JSON.stringify(Object.keys(actualByUom).sort()) ||
+          Object.keys(actualByUom).some(function (uom) {
+            return Math.abs(actualByUom[uom] - expectedByUom[uom]) > 1e-9;
+          })) {
+        throw new Error('The billed quantity breakdown does not match its line items.');
+      }
+    } else {
+      const consumedByOthers = approvedPreviousBills.reduce(function (total, row) {
+        return total + readLedgerQuantity_(row.values[4], 'billed quantity');
+      }, 0);
+      const availableQuantity = Math.max(0, totalQuantity - consumedByOthers);
+      if (quantity > availableQuantity + 1e-9) {
+        throw new Error(
+          'Billed quantity exceeds the remaining balance. Available quantity: ' +
+          availableQuantity + '.',
+        );
+      }
     }
 
     const document = payload.document
@@ -996,6 +1390,9 @@ function saveMonthlyBill_(payload) {
       previousRow ? previousRow.values[8] : now,
       now,
       JSON.stringify(quantityItems),
+      JSON.stringify(sourceData),
+      JSON.stringify(lineItems),
+      'approved',
     ];
     if (previousRow) {
       sheets.bills.getRange(previousRow.rowNumber, 1, 1, values.length)
@@ -1004,9 +1401,35 @@ function saveMonthlyBill_(payload) {
     } else {
       appendLedgerRow_(sheets.bills, values);
     }
-    const consumedAfterSave = consumedByOthers + quantity;
-    if (consumedAfterSave >= totalQuantity - 1e-9) {
-      sheets.workOrders.getRange(workOrderRow.rowNumber, 13).setValue('Inactive');
+    if (isErpWorkOrder) {
+      const allApproved = approvedPreviousBills.reduce(function (allItems, row) {
+        const previousItems = readLedgerLineItems_(
+          row.values[12],
+          'monthly bill line items',
+        );
+        return allItems.concat(previousItems);
+      }, []).concat(lineItems);
+      const remainingByItem = {};
+      workOrderLineItems.forEach(function (item) {
+        const key = normalizedKey_(item.itemCode) + '|' + normalizedKey_(item.uom);
+        remainingByItem[key] = (remainingByItem[key] || 0) + item.quantity;
+      });
+      allApproved.forEach(function (item) {
+        const key = normalizedKey_(item.itemCode) + '|' + normalizedKey_(item.uom);
+        remainingByItem[key] = (remainingByItem[key] || 0) - item.quantity;
+      });
+      if (Object.keys(remainingByItem).every(function (key) {
+        return remainingByItem[key] <= 1e-9;
+      })) {
+        sheets.workOrders.getRange(workOrderRow.rowNumber, 13).setValue('Inactive');
+      }
+    } else {
+      const consumedAfterSave = approvedPreviousBills.reduce(function (total, row) {
+        return total + readLedgerQuantity_(row.values[4], 'billed quantity');
+      }, 0) + quantity;
+      if (consumedAfterSave >= totalQuantity - 1e-9) {
+        sheets.workOrders.getRange(workOrderRow.rowNumber, 13).setValue('Inactive');
+      }
     }
     return { saved: true, id: id };
   } finally {
@@ -1035,13 +1458,9 @@ function deleteMonthlyBill_(billId) {
       const billRows = readLedgerRows_(sheets.bills).filter(function (billRow) {
         return String(billRow.values[1] || '') === workOrderId;
       });
-      const consumedQuantity = billRows.reduce(function (total, billRow) {
-        return total + readLedgerQuantity_(billRow.values[4], 'billed quantity');
-      }, 0);
-      const totalQuantity = readLedgerQuantity_(workOrderRow.values[3], 'allotted quantity');
-      if (consumedQuantity < totalQuantity - 1e-9) {
-        sheets.workOrders.getRange(workOrderRow.rowNumber, 13).setValue('Active');
-      }
+      sheets.workOrders.getRange(workOrderRow.rowNumber, 13).setValue(
+        hasRemainingWorkOrderQuantity_(workOrderRow, billRows) ? 'Active' : 'Inactive',
+      );
     }
     return { id: billId, deleted: true };
   } finally {
@@ -1069,11 +1488,7 @@ function setWorkOrderStatus_(payload) {
     const billRows = readLedgerRows_(sheets.bills).filter(function (row) {
       return String(row.values[1] || '') === workOrderId;
     });
-    const totalQuantity = readLedgerQuantity_(workOrderRow.values[3], 'allotted quantity');
-    const consumedQuantity = billRows.reduce(function (total, row) {
-      return total + readLedgerQuantity_(row.values[4], 'billed quantity');
-    }, 0);
-    if (status === 'active' && consumedQuantity >= totalQuantity - 1e-9) {
+    if (status === 'active' && !hasRemainingWorkOrderQuantity_(workOrderRow, billRows)) {
       throw new Error('A completed work order cannot be activated until its quantity is reopened.');
     }
     sheets.workOrders.getRange(workOrderRow.rowNumber, 13).setValue(
@@ -1083,6 +1498,37 @@ function setWorkOrderStatus_(payload) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function hasRemainingWorkOrderQuantity_(workOrderRow, billRows) {
+  const category = String(workOrderRow.values[2] || '');
+  const approvedBills = billRows.filter(function (row) {
+    return String(row.values[13] || 'approved').trim().toLowerCase() === 'approved';
+  });
+  if (category === 'ERP Work Order' && workOrderRow.values[15]) {
+    const remainingByItem = {};
+    readLedgerLineItems_(workOrderRow.values[15], 'work order line items')
+      .forEach(function (item) {
+      const key = normalizedKey_(item.itemCode) + '|' + normalizedKey_(item.uom);
+      remainingByItem[key] = (remainingByItem[key] || 0) + item.quantity;
+    });
+    approvedBills.forEach(function (row) {
+      if (!row.values[12]) return;
+      readLedgerLineItems_(row.values[12], 'monthly bill line items')
+        .forEach(function (item) {
+        const key = normalizedKey_(item.itemCode) + '|' + normalizedKey_(item.uom);
+        remainingByItem[key] = (remainingByItem[key] || 0) - item.quantity;
+      });
+    });
+    return Object.keys(remainingByItem).some(function (key) {
+      return remainingByItem[key] > 1e-9;
+    });
+  }
+  const totalQuantity = readLedgerQuantity_(workOrderRow.values[3], 'allotted quantity');
+  const consumedQuantity = approvedBills.reduce(function (total, row) {
+    return total + readLedgerQuantity_(row.values[4], 'billed quantity');
+  }, 0);
+  return consumedQuantity < totalQuantity - 1e-9;
 }
 
 function deleteWorkOrder_(workOrderId) {

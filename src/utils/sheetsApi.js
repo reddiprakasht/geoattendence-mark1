@@ -70,7 +70,15 @@ export function requestSheetsApi(payload, timeoutMs = 30000) {
       } else {
         const unsupportedDocumentsAction =
           message.response.error === 'Unsupported request.' &&
-          ['listDocuments', 'uploadDocument', 'getDocument', 'deleteDocument', 'assignDocument'].includes(payload.action);
+          [
+            'listDocuments',
+            'uploadDocument',
+            'getDocument',
+            'deleteDocument',
+            'assignDocument',
+            'uploadExtractionDocument',
+            'getDocumentForExtraction',
+          ].includes(payload.action);
         const unsupportedWorkOrderAction =
           message.response.error === 'Unsupported request.' &&
           [
@@ -137,6 +145,35 @@ export function uploadStoredDocument(sessionToken, document) {
     { action: 'uploadDocument', sessionToken, ...document },
     120000,
   );
+}
+
+export function uploadExtractionDocument(sessionToken, document) {
+  return requestSheetsApi(
+    { action: 'uploadExtractionDocument', sessionToken, ...document },
+    120000,
+  );
+}
+
+export async function extractStoredDocument(sessionToken, fileId) {
+  const response = await fetch('/.netlify/functions/extract-document', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionToken, fileId }),
+  });
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error('The document extraction service returned an unreadable response.');
+  }
+  if (!response.ok) {
+    throw new Error(
+      typeof result?.error === 'string'
+        ? result.error
+        : 'The document could not be analyzed. Try again or enter it manually.',
+    );
+  }
+  return result;
 }
 
 export function getStoredDocument(sessionToken, fileId) {

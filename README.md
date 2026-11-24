@@ -62,18 +62,44 @@ Supported files are JPG, PNG, WebP, and PDF, up to 8 MB each. To authorize priva
 After changing `Code.gs`, deploy a new version of the existing Apps Script web app. Documents are
 served only through admin-authenticated app requests; do not make the Drive folder public.
 
-The **Work Orders** section tracks allotted quantities and monthly bills. The Apps Script creates
-two tabs on first use: `Work Orders` stores each unique work order number, category, allotted
-quantity, optional start date/duration, and its Drive document reference; `Monthly Bills` stores
-the work order ID, billing month, bill reference, billed quantity, and bill document reference.
-Consumed quantity is summed from the monthly bills, and the remaining quantity is calculated from
-the allotment. The app marks a work order **Low Balance** when 10% or less remains and **Completed**
-when the balance reaches zero. Monthly bill quantities are checked against the remaining balance
-on the server; editing or deleting a bill recalculates the balance. Deleting a bill requires the
-administrator's current password, and its uploaded copy remains in Documents. Documents linked to
-the ledger cannot be deleted from Documents while still referenced by a work order or bill.
-After deploying the updated `Code.gs`, open Work Orders while signed in as an administrator to
-create the tabs. Keep the spreadsheet private.
+The **Work Orders** section tracks manually entered quantities and ERP work orders/monthly bills.
+The Apps Script creates two tabs on first use: `Work Orders` stores the order and Drive reference;
+`Monthly Bills` stores the linked bill and Drive reference. Existing columns and rows are retained.
+The Apps Script appends `Source Data` and `Line Items` columns to `Work Orders`, and `Source Data`,
+`Line Items`, and `Approval Status` columns to `Monthly Bills`. This preserves ERP item codes,
+descriptions, UOMs, rates, amounts, dates, contractor identifiers, and document metadata without
+replacing the existing manual-entry fields. Older manually saved bills remain counted as approved
+to preserve their existing balance behavior. New verified bills are saved as approved only after
+the administrator confirms them.
+
+For ERP records, original quantities are retained per item code and UOM. Only approved bill
+quantities with matching item code and UOM reduce the balance; different UOMs are never added
+together. Bill edits and deletions recalculate progress from the saved ledger. Work-order
+duplicates are checked by number and contractor; bill duplicates are checked by voucher number or
+work order, contractor bill number, and billing period. The server repeats duplicate and remaining
+quantity checks when saving. Keep the spreadsheet private.
+
+Administrators can import JPG/JPEG, PNG, and PDF work orders and monthly bills from the Work Orders
+section. The original is first stored in the existing private Drive folder. The Netlify Function
+retrieves it only after Apps Script validates the active administrator session, then sends it to
+Gemini for structured extraction. The split review view supports image zoom/rotation and editable
+header and line-item fields; missing, low-confidence, and marked values are highlighted. A bill
+with an uncertain match requires explicit Work Order selection. The existing manual forms remain
+available as a fallback.
+
+For automatic extraction, configure these **Netlify environment variables** in the site's settings,
+or put them in the ignored root `.env` file for local development:
+
+- `ATTENDANCE_API_URL`: the same HTTPS Apps Script `/exec` URL used by `VITE_ATTENDANCE_API_URL`.
+- `GEMINI_API_KEY`: a server-side Gemini API key. Never add this key to `.env.local`, `.env.production`,
+  source code, or any `VITE_` variable. Gemini may incur usage charges; review your provider's
+  current terms and limits.
+
+After updating `apps-script/Code.gs`, deploy a new version of the existing Apps Script web app.
+The work-order sheets are migrated by appending compatible columns when an administrator opens
+Work Orders. After deploying the site with the Netlify environment variables, verify document
+upload, extraction, preview, and save while signed in as an administrator. If the AI service is
+unconfigured or unavailable, use the manual-entry forms.
 
 The `Attendance` tab is created automatically and stores one record per worker per date. Worker
 attendance uses `IN`, optional `P1` and `P2` checks, then `OUT`; each event is timestamped by Apps
@@ -110,10 +136,19 @@ npm install
 Netlify builds the app with `npm run build` and publishes the generated `dist` directory.
 The production Apps Script web app URL is configured in `.env.production` so it is included in
 Netlify builds. If you replace the Apps Script deployment with a different `/exec` URL, update
-that setting and push the change to trigger a new Netlify deploy. This URL is public client-side
-configuration, not a credential; access is controlled by the app's account sign-in.
+that setting and the Netlify `ATTENDANCE_API_URL` environment variable. This URL is public
+client-side configuration, not a credential; access is controlled by the app's account sign-in.
+The document Function is deployed from `netlify/functions`; Netlify keeps `GEMINI_API_KEY` server
+side and does not expose it in the frontend bundle.
 
 VS Code starts the HTTPS development server when the workspace opens. If prompted, allow automatic tasks for this workspace. Configure the Apps Script URL above, then open `https://localhost:5173/` on this computer; the server must be running for the page to load. To start it manually instead, run `npm.cmd run dev` in a Windows terminal (or `npm run dev` on other platforms). The server uses port 5173 and reports an error instead of silently switching ports if that port is already in use.
+
+Vite's `npm run dev` server does not run Netlify Functions. Create the root `.env` file from the
+provided template, paste your Gemini key into `GEMINI_API_KEY`, and run `npm run dev:netlify`
+(or `npx netlify dev`) to test the app and function together at `http://localhost:8888/`.
+Netlify Dev proxies Vite on port 5173 and provides `/.netlify/functions/...` routes; use the
+port-8888 URL while testing extraction. Never put the Gemini key in a `VITE_` variable. Manual
+entry remains available when the extraction function is not running.
 
 The development server listens on local and network interfaces and prints the current network URL to open on a phone. The local certificate authority and development certificates are stored under `%USERPROFILE%\.copilot\certificates\geoattendance-local-https`.
 
